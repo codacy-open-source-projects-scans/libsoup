@@ -1,5 +1,5 @@
 project('libsoup', 'c',
-        version: '3.4.4',
+        version: '3.5.0',
         meson_version : '>= 0.54',
         license : 'LGPL-2.0-or-later',
         default_options : [
@@ -98,7 +98,7 @@ endif
 
 add_project_arguments(common_flags, language : 'c')
 
-glib_required_version = '>= 2.69.1'
+glib_required_version = '>= 2.70.0'
 glib_dep = dependency('glib-2.0', version : glib_required_version,
                        fallback: ['glib', 'libglib_dep'])
 gmodule_dep = dependency('gmodule-2.0', version : glib_required_version,
@@ -328,13 +328,13 @@ else
         link_args: libs_output.stdout().split(),
         compile_args: cflags_output.stdout().split())
     endif
-  else
-    gssapi_dep = dependency('', required: false)
   endif
 endif
 
 if enable_gssapi
   add_project_arguments('-DLIBSOUP_HAVE_GSSAPI=1', language : 'c')
+else
+  gssapi_dep = dependency('', required: false)
 endif
 
 ################
