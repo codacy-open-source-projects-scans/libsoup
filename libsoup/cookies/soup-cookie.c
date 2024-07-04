@@ -209,13 +209,14 @@ parse_one_cookie (const char *header, GUri *origin)
 #define MATCH_NAME(name) ((end - start == strlen (name)) && !g_ascii_strncasecmp (start, name, end - start))
 
 		if (MATCH_NAME ("domain") && has_value) {
+			g_free (cookie->domain);
 			cookie->domain = parse_value (&p, TRUE);
 			if (!*cookie->domain) {
 				g_free (cookie->domain);
 				cookie->domain = NULL;
 			}
 		} else if (MATCH_NAME ("expires") && has_value) {
-			cookie->expires = parse_date (&p);
+		        soup_cookie_set_expires (cookie, parse_date (&p));
 		} else if (MATCH_NAME ("httponly")) {
 			cookie->http_only = TRUE;
 			if (has_value)
@@ -232,6 +233,7 @@ parse_one_cookie (const char *header, GUri *origin)
 			}
 			g_free (max_age_str);
 		} else if (MATCH_NAME ("path") && has_value) {
+			g_free (cookie->path);
 			cookie->path = parse_value (&p, TRUE);
 			if (*cookie->path != '/') {
 				g_free (cookie->path);
