@@ -1,5 +1,5 @@
 project('libsoup', 'c',
-        version: '3.6.0',
+        version: '3.7.0',
         meson_version : '>= 0.54',
         license : 'LGPL-2.0-or-later',
         default_options : [
@@ -18,7 +18,7 @@ soup_version = meson.project_version()
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to [C+1, 0, 0]
 # - If the interface is the same as the previous version, use [C, R+1, A].
-soup_version_info = [7, 1, 7]
+soup_version_info = [7, 3, 7]
 
 # Turn [C, R, A] into an actual usable *soversion*.
 soup_soversion_major = soup_version_info[0] - soup_version_info[2] # Current-Age
@@ -141,7 +141,7 @@ endif
 
 unix_socket_dep = dependency('gio-unix-2.0',
                              version : glib_required_version,
-                             fallback: ['glib', 'libgiounix_dep'],
+                             fallback: (host_system != 'windows') ? ['glib', 'libgiounix_dep'] : [],
                              required : false)
 
 platform_deps = []
@@ -303,7 +303,6 @@ endif
 # GSSAPI support #
 ##################
 gssapi_opt = get_option('gssapi')
-enable_gssapi = false
 if cc.get_id() == 'msvc'
   if host_machine.cpu_family() == 'x86'
     gssapi_lib_type = '32'
@@ -313,31 +312,12 @@ if cc.get_id() == 'msvc'
   gssapi_dep = cc.find_library('gssapi' + gssapi_lib_type,
     has_headers: 'gssapi/gssapi.h',
     required: gssapi_opt)
-  if gssapi_dep.found()
-      enable_gssapi = true
-  endif
 else
-  krb5_config_path = get_option('krb5_config')
-  if not meson.is_cross_build() and krb5_config_path == ''
-    krb5_config_path = 'krb5-config'
-  endif
-  krb5_config = find_program(krb5_config_path, required : gssapi_opt)
-  if krb5_config.found()
-    libs_output = run_command(krb5_config, '--libs', 'gssapi', check: gssapi_opt.enabled())
-    cflags_output = run_command(krb5_config, '--cflags', 'gssapi', check: gssapi_opt.enabled())
-    if libs_output.returncode() == 0 and cflags_output.returncode() == 0
-      enable_gssapi = true
-      gssapi_dep = declare_dependency(
-        link_args: libs_output.stdout().split(),
-        compile_args: cflags_output.stdout().split())
-    endif
-  endif
+  gssapi_dep = dependency('krb5-gssapi', required: gssapi_opt)
 endif
 
-if enable_gssapi
+if gssapi_dep.found()
   add_project_arguments('-DLIBSOUP_HAVE_GSSAPI=1', language : 'c')
-else
-  gssapi_dep = dependency('', required: false)
 endif
 
 ################
@@ -377,6 +357,10 @@ configinc = include_directories('.')
 
 prefix = get_option('prefix')
 
+if get_option('b_sanitize') != 'none'
+  cdata.set_quoted('B_SANITIZE_OPTION', get_option('b_sanitize'))
+endif
+
 cdata.set_quoted('PACKAGE_VERSION', soup_version)
 cdata.set_quoted('LOCALEDIR', join_paths(prefix, get_option('localedir')))
 cdata.set_quoted('GETTEXT_PACKAGE', libsoup_api_name)
@@ -407,7 +391,7 @@ summary({
 )
 
 summary({
-    'GSSAPI' : enable_gssapi,
+    'GSSAPI' : gssapi_dep.found(),
     'NTLM' : ntlm_auth.found(),
     'Brotli' : brotlidec_dep.found(),
     'Translations' : xgettext.found(),

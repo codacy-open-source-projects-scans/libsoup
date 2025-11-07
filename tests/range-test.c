@@ -1,5 +1,7 @@
 /* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 8 -*- */
 
+#include "config.h"
+
 #include "test-utils.h"
 
 GBytes *full_response;
@@ -82,6 +84,7 @@ do_single_range (SoupSession *session, SoupMessage *msg,
 				debug_printf (1, "    Content-Range: %s\n", content_range);
 		}
 
+		g_clear_pointer (&body, g_bytes_unref);
 		g_object_unref (msg);
 		return;
 	}
@@ -333,6 +336,7 @@ do_range_test (SoupSession *session, const char *uri,
 				    20, 30); 
 }
 
+#ifdef HAVE_APACHE
 static void
 do_apache_range_test (void)
 {
@@ -346,6 +350,7 @@ do_apache_range_test (void)
 
 	soup_test_session_abort_unref (session);
 }
+#endif
 
 static void
 server_handler (SoupServer        *server,
@@ -387,12 +392,16 @@ main (int argc, char **argv)
 	int ret;
 
 	test_init (argc, argv, NULL);
+#ifdef HAVE_APACHE
 	apache_init ();
+#endif
 
 	full_response = soup_test_get_index ();
 	test_response = g_malloc0 (g_bytes_get_size (full_response));
 
+#ifdef HAVE_APACHE
 	g_test_add_func ("/ranges/apache", do_apache_range_test);
+#endif
 	g_test_add_func ("/ranges/libsoup", do_libsoup_range_test);
 
 	ret = g_test_run ();

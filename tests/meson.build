@@ -5,6 +5,15 @@ installed_tests_enabled = get_option('installed_tests')
 installed_tests_template_tap = files('template-tap.test.in')
 abs_installed_tests_execdir = join_paths(prefix, installed_tests_execdir)
 
+if get_option('pkcs11_tests').enabled()
+  assert(gnutls_dep.found()) # Required earlier.
+  enable_pkcs11_tests = true
+elif get_option('pkcs11_tests').auto()
+  enable_pkcs11_tests = gnutls_dep.found()
+else
+  enable_pkcs11_tests = false
+endif
+
 if cc.get_id() == 'msvc'
   test_utils = static_library(test_utils_name, test_utils_name + '.c',
     dependencies : [ libsoup_static_dep, unix_socket_dep ])
@@ -23,7 +32,7 @@ test_resources = gnome.compile_resources('soup-tests',
   install_dir : installed_tests_execdir,
 )
 
-if gnutls_dep.found()
+if enable_pkcs11_tests
   mock_pkcs11_module = shared_module('mock-pkcs11',
       sources: 'mock-pkcs11.c',
       name_prefix: '',
@@ -78,8 +87,8 @@ tests = [
   {'name': 'date'},
   {'name': 'forms'},
   {'name': 'header-parsing'},
-  {'name': 'http2'},
-  {'name': 'http2-body-stream'},
+  {'name': 'http2', 'slow': true},
+  {'name': 'http2-body-stream', 'slow': true},
   {'name': 'hsts'},
   {'name': 'hsts-db'},
   {'name': 'logger'},
@@ -88,24 +97,32 @@ tests = [
   {'name': 'multithread'},
   {'name': 'no-ssl'},
   {'name': 'ntlm'},
+  {'name': 'range', 'parallel': false},
   {'name': 'redirect'},
   {'name': 'request-body'},
   {'name': 'samesite'},
   {'name': 'session'},
   {'name': 'server-auth'},
+  {'name': 'server-mem-limit'},
   {'name': 'server'},
-  {'name': 'sniffing'},
+  {'name': 'sniffing',
+    'depends': [test_resources],
+  },
   {'name': 'ssl',
    'dependencies': [gnutls_dep],
    'depends': mock_pkcs11_module,
-   'c_args': '-DHAVE_GNUTLS=@0@'.format(gnutls_dep.found() ? 1 : 0),
+   'c_args': [
+      '-DHAVE_GNUTLS=@0@'.format(gnutls_dep.found() ? 1 : 0),
+      '-DENABLE_PKCS11_TESTS=@0@'.format(enable_pkcs11_tests ? 1 : 0),
+   ]
   },
   {'name': 'streaming'},
-  {'name': 'timeout'},
+  {'name': 'timeout', 'slow': true},
   {'name': 'tld'},
   {'name': 'uri-parsing'},
   {'name': 'websocket',
-   'dependencies': [libz_dep]},
+   'dependencies': [libz_dep],
+   'slow': true},
 ]
 
 if brotlidec_dep.found()
@@ -132,7 +149,6 @@ if have_apache
   tests += [
     {'name': 'auth', 'parallel': false},
     {'name': 'connection', 'parallel': false},
-    {'name': 'range', 'parallel': false},
     {'name': 'proxy', 'parallel': false},
   ]
 
@@ -205,14 +221,13 @@ foreach test: tests
     install_dir : installed_tests_execdir,
     install_rpath : abs_installed_tests_execdir,
   )
-  # Increase the timeout as on some architectures the tests could be slower
-  # than the default 30 seconds.
+
   test(test_name, test_target,
     args : ['--debug'],
     env : env,
     is_parallel : test.get('parallel', true),
     depends : test.get('depends', []),
-    timeout : 60,
+    timeout : test.get('slow', false) ? 300 : 30,
     protocol : 'tap',
   )
 endforeach

@@ -23,7 +23,7 @@
  *
  * Persistent HTTP Strict Transport Security enforcer.
  *
- * #SoupHSTSEnforcerDB is a [class@HSTSEnforcer] that uses a SQLite
+ * [class@HSTSEnforcerDB] is a [class@HSTSEnforcer] that uses a SQLite
  * database as a backend for persistency.
  **/
 
@@ -104,13 +104,13 @@ soup_hsts_enforcer_db_get_property (GObject *object, guint prop_id,
  * soup_hsts_enforcer_db_new:
  * @filename: the filename of the database to read/write from.
  *
- * Creates a #SoupHSTSEnforcerDB.
+ * Creates a [class@HSTSEnforcerDB].
  *
  * @filename will be read in during the initialization of a
- * #SoupHSTSEnforcerDB, in order to create an initial set of HSTS
+ * [class@HSTSEnforcerDB], in order to create an initial set of HSTS
  * policies. If the file doesn't exist, a new database will be created
  * and initialized. Changes to the policies during the lifetime of a
- * #SoupHSTSEnforcerDB will be written to @filename when
+ * [class@HSTSEnforcerDB] will be written to @filename when
  * [signal@HSTSEnforcer::changed] is emitted.
  *
  * Returns: the new #SoupHSTSEnforcer
@@ -169,8 +169,9 @@ query_all_callback (void *data, int argc, char **argv, char **colname)
 	if (policy) {
 		soup_hsts_enforcer_set_policy (hsts_enforcer, policy);
 		soup_hsts_policy_free (policy);
-	} else
-		g_date_time_unref (expires);
+	}
+
+        g_date_time_unref (expires);
 
 	return 0;
 }

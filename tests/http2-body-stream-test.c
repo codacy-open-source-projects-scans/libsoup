@@ -23,14 +23,19 @@
 static void
 do_large_data_test (void)
 {
-#define CHUNK_SIZE (gsize)1024 * 1024 * 512 // 512 MiB
-#define TEST_SIZE CHUNK_SIZE * 20 // 10 GiB
+#define CHUNK_SIZE ((gsize)1024 * 1024 * 512) // 512 MiB
+#define TEST_SIZE (CHUNK_SIZE * 4) // 2 GiB
 
         GInputStream *stream = soup_body_input_stream_http2_new ();
         SoupBodyInputStreamHttp2 *mem_stream = SOUP_BODY_INPUT_STREAM_HTTP2 (stream);
         gsize data_needed = TEST_SIZE;
-        guint8 *memory_chunk = g_new (guint8, CHUNK_SIZE); 
-        guint8 *trash_buffer = g_new (guint8, CHUNK_SIZE);
+        guint8 *memory_chunk = g_try_new (guint8, CHUNK_SIZE);
+        guint8 *trash_buffer = g_try_new (guint8, CHUNK_SIZE);
+
+	if (memory_chunk == NULL || trash_buffer == NULL) {
+		g_test_skip ("large memory allocation failed");
+		goto out;
+	}
 
         /* We can add unlimited data and as long as its read the data will
          * be freed, so this should work fine even though its reading GB of data */
@@ -55,6 +60,7 @@ do_large_data_test (void)
                 data_needed -= CHUNK_SIZE;
         }
 
+out:
         g_free (trash_buffer);
         g_free (memory_chunk);
         g_object_unref (stream);

@@ -119,6 +119,52 @@ typedef struct {
 static void soup_client_message_io_http2_finished (SoupClientMessageIO *iface, SoupMessage *msg);
 static ssize_t on_data_source_read_callback (nghttp2_session *session, int32_t stream_id, uint8_t *buf, size_t length, uint32_t *data_flags, nghttp2_data_source *source, void *user_data);
 
+#define ANSI_CODE_RESET      "\033[00m"
+#define ANSI_CODE_BOLD       "\033[1m"
+#define ANSI_CODE_DARK       "\033[2m"
+#define ANSI_CODE_UNDERLINE  "\033[4m"
+#define ANSI_CODE_BLINK      "\033[5m"
+#define ANSI_CODE_REVERSE    "\033[7m"
+#define ANSI_CODE_CONCEALED  "\033[8m"
+#define ANSI_CODE_GRAY       "\033[30m"
+#define ANSI_CODE_RED        "\033[31m"
+#define ANSI_CODE_GREEN      "\033[32m"
+#define ANSI_CODE_YELLOW     "\033[33m"
+#define ANSI_CODE_BLUE       "\033[34m"
+#define ANSI_CODE_MAGENTA    "\033[35m"
+#define ANSI_CODE_CYAN       "\033[36m"
+#define ANSI_CODE_WHITE      "\033[37m"
+#define ANSI_CODE_BG_GRAY    "\033[40m"
+#define ANSI_CODE_BG_RED     "\033[41m"
+#define ANSI_CODE_BG_GREEN   "\033[42m"
+#define ANSI_CODE_BG_YELLOW  "\033[43m"
+#define ANSI_CODE_BG_BLUE    "\033[44m"
+#define ANSI_CODE_BG_MAGENTA "\033[45m"
+#define ANSI_CODE_BG_CYAN    "\033[46m"
+#define ANSI_CODE_BG_WHITE   "\033[47m"
+
+static const char *
+id_color (guint32 id)
+{
+        switch (id % 6) {
+            case 0:
+                return ANSI_CODE_RED;
+            case 1:
+                return ANSI_CODE_GREEN;
+            case 2:
+                return ANSI_CODE_YELLOW;
+            case 3:
+                return ANSI_CODE_BLUE;
+            case 4:
+                return ANSI_CODE_MAGENTA;
+            case 5:
+                return ANSI_CODE_CYAN;
+        }
+
+        g_assert_not_reached ();
+        return "";
+}
+
 G_GNUC_PRINTF(3, 0)
 static void
 h2_debug (SoupClientMessageIOHTTP2   *io,
@@ -141,7 +187,7 @@ h2_debug (SoupClientMessageIOHTTP2   *io,
                 stream_id = data->stream_id;
 
         g_assert (io);
-        g_log (G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG, "[CLIENT] [C%" G_GUINT64_FORMAT "-S%u] [%s] %s", io->connection_id, stream_id, data ? soup_http2_io_state_to_string (data->state) : "-", message);
+        g_log (G_LOG_DOMAIN, G_LOG_LEVEL_DEBUG, "[CLIENT] [%sC%" G_GUINT64_FORMAT "%s-%sS%u%s] [%s] %s", id_color (io->connection_id), io->connection_id, ANSI_CODE_RESET, id_color (stream_id), stream_id, ANSI_CODE_RESET, data ? soup_http2_io_state_to_string (data->state) : "-", message);
 
         g_free (message);
 }
@@ -464,13 +510,13 @@ io_read_ready (GObject                  *stream,
         if (conn)
                 soup_connection_set_in_use (conn, TRUE);
 
-        while (progress && nghttp2_session_want_read (io->session)) {
+        while (nghttp2_session_want_read (io->session) || nghttp2_session_want_write (io->session)) {
                 progress = io_read (io, FALSE, NULL, &error);
-                if (progress) {
-                        g_list_foreach (io->pending_io_messages,
-                                        (GFunc)soup_http2_message_data_check_status,
-                                        NULL);
-                }
+                g_list_foreach (io->pending_io_messages,
+                                (GFunc)soup_http2_message_data_check_status,
+                                NULL);
+                if (!progress || error)
+                        break;
         }
 
         if (g_error_matches (error, G_IO_ERROR, G_IO_ERROR_WOULD_BLOCK)) {
@@ -500,6 +546,28 @@ io_read_ready (GObject                  *stream,
 }
 
 static void
+sniff_for_empty_response (SoupMessage *msg)
+{
+        if (soup_message_has_content_sniffer (msg)) {
+                const char *content_type = soup_message_headers_get_content_type (soup_message_get_response_headers (msg), NULL);
+                if (!content_type)
+                     content_type = "text/plain";
+                soup_message_content_sniffed (msg, content_type, NULL);
+        }
+}
+
+static gboolean
+message_has_content_length_zero (SoupMessage *msg)
+{
+        SoupMessageHeaders *headers = soup_message_get_response_headers (msg);
+
+        if (soup_message_headers_get_encoding (headers) != SOUP_ENCODING_CONTENT_LENGTH)
+                return FALSE;
+
+        return soup_message_headers_get_content_length (headers) == 0;
+}
+
+static void
 io_try_sniff_content (SoupHTTP2MessageData *data,
                       gboolean              blocking,
                       GCancellable         *cancellable)
@@ -509,6 +577,13 @@ io_try_sniff_content (SoupHTTP2MessageData *data,
         /* This can re-enter in sync mode */
         if (data->in_io_try_sniff_content)
                 return;
+
+        if (message_has_content_length_zero (data->msg)) {
+                sniff_for_empty_response (data->msg);
+                h2_debug (data->io, data, "[DATA] Sniffed content (Content-Length was 0)");
+                advance_state_from (data, STATE_READ_DATA_START, STATE_READ_DATA);
+                return;
+        }
 
         data->in_io_try_sniff_content = TRUE;
 
@@ -601,10 +676,25 @@ memory_stream_need_more_data_callback (SoupBodyInputStreamHttp2 *stream,
         SoupHTTP2MessageData *data = (SoupHTTP2MessageData*)user_data;
         GError *error = NULL;
 
-        if (nghttp2_session_want_read (data->io->session))
+        if (data->in_io_try_sniff_content)
+                return NULL;
+
+        if (nghttp2_session_want_read (data->io->session) || nghttp2_session_want_write (data->io->session))
                 io_read (data->io, blocking, cancellable, &error);
 
         return error;
+}
+
+static void
+memory_stream_read_data (SoupBodyInputStreamHttp2 *stream,
+                         guint64                   bytes_read,
+                         gpointer                  user_data)
+{
+        SoupHTTP2MessageData *data = (SoupHTTP2MessageData*)user_data;
+
+        h2_debug (data->io, data, "[BODY_STREAM] Consumed %" G_GUINT64_FORMAT " bytes", bytes_read);
+
+        NGCHECK (nghttp2_session_consume(data->io->session, data->stream_id, (size_t)bytes_read));
 }
 
 static int
@@ -634,6 +724,8 @@ on_begin_frame_callback (nghttp2_session        *session,
                         data->body_istream = soup_body_input_stream_http2_new ();
                         g_signal_connect (data->body_istream, "need-more-data",
                                           G_CALLBACK (memory_stream_need_more_data_callback), data);
+                        g_signal_connect (data->body_istream, "read-data",
+                                          G_CALLBACK (memory_stream_read_data), data);
 
                         g_assert (!data->decoded_data_istream);
                         data->decoded_data_istream = soup_session_setup_message_body_input_stream (data->item->session,
@@ -762,8 +854,7 @@ on_frame_recv_callback (nghttp2_session     *session,
                 if (soup_message_get_status (data->msg) == SOUP_STATUS_NO_CONTENT || frame->hd.flags & NGHTTP2_FLAG_END_STREAM) {
                         h2_debug (io, data, "Stream done");
                         advance_state_from (data, STATE_READ_HEADERS, STATE_READ_DATA_START);
-                        if (soup_message_has_content_sniffer (data->msg))
-                                soup_message_content_sniffed (data->msg, "text/plain", NULL);
+                        sniff_for_empty_response (data->msg);
                         advance_state_from (data, STATE_READ_DATA_START, STATE_READ_DATA);
                 }
                 break;
@@ -954,6 +1045,9 @@ on_frame_send_callback (nghttp2_session     *session,
                         g_source_attach (source, g_task_get_context (io->close_task));
                         g_source_unref (source);
                 }
+                break;
+        case NGHTTP2_WINDOW_UPDATE:
+                h2_debug (io, data, "[SEND] [WINDOW_UPDATE] stream_id=%u increment=%d", frame->hd.stream_id, frame->window_update.window_size_increment);
                 break;
         default:
                 h2_debug (io, data, "[SEND] [%s] stream_id=%u", soup_http2_frame_type_to_string (frame->hd.type), frame->hd.stream_id);
@@ -1937,17 +2031,18 @@ soup_client_message_io_http2_init (SoupClientMessageIOHTTP2 *io)
         nghttp2_session_callbacks_set_on_frame_send_callback (callbacks, on_frame_send_callback);
         nghttp2_session_callbacks_set_on_stream_close_callback (callbacks, on_stream_close_callback);
 
-#ifdef HAVE_NGHTTP2_OPTION_SET_NO_RFC9113_LEADING_AND_TRAILING_WS_VALIDATION
         nghttp2_option *option;
 
         nghttp2_option_new (&option);
-        nghttp2_option_set_no_rfc9113_leading_and_trailing_ws_validation (option, 1);
-        NGCHECK (nghttp2_session_client_new2 (&io->session, callbacks, io, option));
-        nghttp2_option_del (option);
-#else
-        NGCHECK (nghttp2_session_client_new (&io->session, callbacks, io));
-#endif
 
+#ifdef HAVE_NGHTTP2_OPTION_SET_NO_RFC9113_LEADING_AND_TRAILING_WS_VALIDATION
+        nghttp2_option_set_no_rfc9113_leading_and_trailing_ws_validation (option, 1);
+#endif
+        nghttp2_option_set_no_auto_window_update (option, 1);
+
+        NGCHECK (nghttp2_session_client_new2 (&io->session, callbacks, io, option));
+
+        nghttp2_option_del (option);
         nghttp2_session_callbacks_del (callbacks);
 
         io->messages = g_hash_table_new_full (g_direct_hash, g_direct_equal, NULL, (GDestroyNotify)soup_http2_message_data_free);

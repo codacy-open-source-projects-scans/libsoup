@@ -186,7 +186,7 @@ soup_headers_parse_request (const char          *str,
 	/* RFC 2616 4.1 "servers SHOULD ignore any empty line(s)
 	 * received where a Request-Line is expected."
 	 */
-	while ((*str == '\r' || *str == '\n') && len > 0) {
+	while (len > 0 && (*str == '\r' || *str == '\n')) {
 		str++;
 		len--;
 	}
@@ -225,7 +225,7 @@ soup_headers_parse_request (const char          *str,
 	    !g_ascii_isdigit (version[5]))
 		return SOUP_STATUS_BAD_REQUEST;
 	major_version = strtoul (version + 5, &p, 10);
-	if (*p != '.' || !g_ascii_isdigit (p[1]))
+	if (p + 1 >= str + len || *p != '.' || !g_ascii_isdigit (p[1]))
 		return SOUP_STATUS_BAD_REQUEST;
 	minor_version = strtoul (p + 1, &p, 10);
 	version_end = p;
@@ -240,7 +240,12 @@ soup_headers_parse_request (const char          *str,
 	if (headers >= str + len || *headers != '\n')
 		return SOUP_STATUS_BAD_REQUEST;
 
-	if (!soup_headers_parse (str, len, req_headers)) 
+	// Ensure pointer location for Request-Line end matches location of 'headers'
+	p = strchr(str, '\n');
+	if (p != headers)
+		return SOUP_STATUS_BAD_REQUEST;
+
+	if (!soup_headers_parse (str, len, req_headers))
 		return SOUP_STATUS_BAD_REQUEST;
 
 	if (soup_message_headers_get_expectations (req_headers) &
@@ -371,7 +376,7 @@ soup_headers_parse_response (const char          *str,
 	 * after a response, which we then see prepended to the next
 	 * response on that connection.
 	 */
-	while ((*str == '\r' || *str == '\n') && len > 0) {
+	while (len > 0 && (*str == '\r' || *str == '\n')) {
 		str++;
 		len--;
 	}
@@ -530,7 +535,7 @@ soup_header_parse_quality_list (const char *header, GSList **unacceptable)
 	GSList *unsorted;
 	QualityItem *array;
 	GSList *sorted, *iter;
-	char *item, *semi;
+	char *semi;
 	const char *param, *equal, *value;
 	double qval;
 	int n;
@@ -543,9 +548,8 @@ soup_header_parse_quality_list (const char *header, GSList **unacceptable)
 	unsorted = soup_header_parse_list (header);
 	array = g_new0 (QualityItem, g_slist_length (unsorted));
 	for (iter = unsorted, n = 0; iter; iter = iter->next) {
-		item = iter->data;
 		qval = 1.0;
-		for (semi = strchr (item, ';'); semi; semi = strchr (semi + 1, ';')) {
+		for (semi = strchr (iter->data, ';'); semi; semi = strchr (semi + 1, ';')) {
 			param = skip_lws (semi + 1);
 			if (*param != 'q')
 				continue;
@@ -577,15 +581,15 @@ soup_header_parse_quality_list (const char *header, GSList **unacceptable)
 		if (qval == 0.0) {
 			if (unacceptable) {
 				*unacceptable = g_slist_prepend (*unacceptable,
-								 item);
+								 g_steal_pointer (&iter->data));
 			}
 		} else {
-			array[n].item = item;
+			array[n].item = g_steal_pointer (&iter->data);
 			array[n].qval = qval;
 			n++;
 		}
 	}
-	g_slist_free (unsorted);
+	g_slist_free_full (unsorted, g_free);
 
 	qsort (array, n, sizeof (QualityItem), sort_by_qval);
 	sorted = NULL;
@@ -639,6 +643,45 @@ soup_header_contains (const char *header, const char *token)
 		if (end - header == len &&
 		    !g_ascii_strncasecmp (header, token, len))
 			return TRUE;
+		header = skip_delims (end, ',');
+	}
+
+	return FALSE;
+}
+
+/**
+ * soup_header_contains_case_sensitive:
+ * @header: An HTTP header suitable for parsing with
+ *   [func@header_parse_list]
+ * @token: a token
+ *
+ * Parses @header to see if it contains the token @token (matched
+ * case-sensitively).
+ *
+ * Note that this can't be used with lists that have qvalues.
+ *
+ * Returns: whether or not @header contains @token
+ *
+ * Since: 3.8
+ **/
+gboolean
+soup_header_contains_case_sensitive (const char *header, const char *token)
+{
+	const char *end;
+	guint len;
+
+	g_return_val_if_fail (header != NULL, FALSE);
+	g_return_val_if_fail (token != NULL, FALSE);
+
+	len = strlen (token);
+
+	header = skip_delims (header, ',');
+	while (*header) {
+		end = skip_item (header, ',');
+		if (end - header == len &&
+		    !strncmp (header, token, len)) {
+			return TRUE;
+		}
 		header = skip_delims (end, ',');
 	}
 
@@ -907,7 +950,7 @@ append_param_quoted (GString    *string,
 		     const char *name,
 		     const char *value)
 {
-	int len;
+	gsize len;
 
 	g_string_append (string, name);
 	g_string_append (string, "=\"");

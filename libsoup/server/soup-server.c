@@ -28,7 +28,7 @@
 /**
  * SoupServer:
  *
- * #SoupServer provides a basic implementation of an HTTP server. The
+ * [class@Server] provides a basic implementation of an HTTP server. The
  * recommended usage of this server is for internal use, tasks like
  * a mock server for tests, a private service for IPC, etc. It is not
  * recommended to be exposed to untrusted clients as it may be vulnerable
@@ -42,20 +42,20 @@
  * the path.)
  *
  * When a new connection is accepted (or a new request is started on
- * an existing persistent connection), the #SoupServer will emit
+ * an existing persistent connection), the [class@Server] will emit
  * [signal@Server::request-started] and then begin processing the request
  * as described below, but note that once the message is assigned a
  * status-code, then callbacks after that point will be
  * skipped. Note also that it is not defined when the callbacks happen
  * relative to various [class@ServerMessage] signals.
  *
- * Once the headers have been read, #SoupServer will check if there is
+ * Once the headers have been read, [class@Server] will check if there is
  * a [class@AuthDomain] `(qv)` covering the Request-URI; if so, and if the
  * message does not contain suitable authorization, then the
  * [class@AuthDomain] will set a status of %SOUP_STATUS_UNAUTHORIZED on
  * the message.
  *
- * After checking for authorization, #SoupServer will look for "early"
+ * After checking for authorization, [class@Server] will look for "early"
  * handlers (added with [method@Server.add_early_handler]) matching the
  * Request-URI. If one is found, it will be run; in particular, this
  * can be used to connect to signals to do a streaming read of the
@@ -63,10 +63,10 @@
  *
  * (At this point, if the request headers contain `Expect:
  * 100-continue`, and a status code has been set, then
- * #SoupServer will skip the remaining steps and return the response.
+ * [class@Server] will skip the remaining steps and return the response.
  * If the request headers contain `Expect:
  * 100-continue` and no status code has been set,
- * #SoupServer will return a %SOUP_STATUS_CONTINUE status before
+ * [class@Server] will return a %SOUP_STATUS_CONTINUE status before
  * continuing.)
  *
  * The server will then read in the response body (if present). At
@@ -80,7 +80,7 @@
  * run.
  *
  * Then, if the path has a WebSocket handler registered (and has
- * not yet been assigned a status), #SoupServer will attempt to
+ * not yet been assigned a status), [class@Server] will attempt to
  * validate the WebSocket handshake, filling in the response and
  * setting a status of %SOUP_STATUS_SWITCHING_PROTOCOLS or
  * %SOUP_STATUS_BAD_REQUEST accordingly.
@@ -105,13 +105,13 @@
  * Once the server is set up, make one or more calls to
  * [method@Server.listen], [method@Server.listen_local], or
  * [method@Server.listen_all] to tell it where to listen for
- * connections. (All ports on a #SoupServer use the same handlers; if
+ * connections. (All ports on a [class@Server] use the same handlers; if
  * you need to handle some ports differently, such as returning
  * different data for http and https, you'll need to create multiple
- * `SoupServer`s, or else check the passed-in URI in the handler
+ * [class@Server]s, or else check the passed-in URI in the handler
  * function.).
  *
- * #SoupServer will begin processing connections as soon as you return
+ * [class@Server] will begin processing connections as soon as you return
  * to (or start) the main loop for the current thread-default
  * [struct@GLib.MainContext].
  */
@@ -527,7 +527,7 @@ soup_server_class_init (SoupServerClass *server_class)
 	 *
 	 * As with [property@Session:user_agent], if you set a
 	 * [property@Server:server-header] property that has trailing
-	 * whitespace, #SoupServer will append its own product token (eg,
+	 * whitespace, [class@Server] will append its own product token (eg,
 	 * `libsoup/2.3.2`) to the end of the header for you.
 	 **/
         properties[PROP_SERVER_HEADER] =
@@ -547,7 +547,7 @@ soup_server_class_init (SoupServerClass *server_class)
  * @optname1: name of first property to set
  * @...: value of @optname1, followed by additional property/value pairs
  *
- * Creates a new #SoupServer.
+ * Creates a new [class@Server].
  *
  * This is exactly equivalent to calling [ctor@GObject.Object.new] and
  * specifying %SOUP_TYPE_SERVER as the type.
@@ -710,7 +710,7 @@ soup_server_get_tls_auth_mode (SoupServer *server)
  * certificate to use.
  *
  * If you are using the deprecated single-listener APIs, then a return value of
- * %TRUE indicates that the #SoupServer serves https exclusively. If you are
+ * %TRUE indicates that the [class@Server] serves https exclusively. If you are
  * using [method@Server.listen], etc, then a %TRUE return value merely indicates
  * that the server is *able* to do https, regardless of whether it actually
  * currently is or not. Use [method@Server.get_uris] to see if it currently has
@@ -852,6 +852,11 @@ got_headers (SoupServer        *server,
 
 	date = g_date_time_new_now_utc ();
 	date_string = soup_date_time_to_string (date, SOUP_DATE_HTTP);
+	if (!date_string) {
+		g_date_time_unref (date);
+		return;
+	}
+
 	soup_message_headers_replace_common (headers, SOUP_HEADER_DATE, date_string);
 	g_free (date_string);
 	g_date_time_unref (date);
@@ -1340,12 +1345,13 @@ soup_server_listen_ipv4_ipv6 (SoupServer *server,
 	}
 	g_object_unref (addr6);
 
-	if (v4sock && g_error_matches (my_error, G_IO_ERROR,
-				       G_IO_ERROR_NOT_SUPPORTED
-				       )) {
+	if (v4sock &&
+            (g_error_matches (my_error, G_IO_ERROR, G_IO_ERROR_NOT_SUPPORTED) ||
+             g_error_matches (my_error, G_IO_ERROR, G_IO_ERROR_CONNECTION_REFUSED))) {
 		/* No IPv6 support, but IPV6_ONLY wasn't specified, so just
 		 * ignore the failure.
 		 */
+                g_debug ("Ignoring IPv6 listen error, assuming it isn't supported: %s", my_error->message);
 		g_error_free (my_error);
 		return TRUE;
 	}
@@ -1525,8 +1531,8 @@ soup_server_listen_socket (SoupServer *server, GSocket *socket,
  * the addresses `0.0.0.0` and `::`, rather than actually returning separate
  * URIs for each interface on the system.
  *
- * Returns: (transfer full) (element-type GUri): a list of #GUris, which you
- *   must free when you are done with it.
+ * Returns: (transfer full) (element-type GUri): a list of [struct@GLib.Uri], which you
+ *   must free with each element with [method@GLib.Uri.unref] when you are done with it.
  */
 GSList *
 soup_server_get_uris (SoupServer *server)
@@ -1745,7 +1751,7 @@ soup_server_add_early_handler (SoupServer            *server,
  * @msg: the #SoupServerMessage
  * @user_data: the data passed to @soup_server_add_handler
  *
- * A callback used to handle WebSocket requests to a #SoupServer.
+ * A callback used to handle WebSocket requests to a [class@Server].
  *
  * The callback will be invoked after sending the handshake response back to the
  * client (and is only invoked if the handshake was successful).
@@ -1894,7 +1900,7 @@ soup_server_remove_auth_domain (SoupServer *server, SoupAuthDomain *auth_domain)
  * resume I/O.
  *
  * This must only be called on a [class@ServerMessage] which was created by the
- * #SoupServer and are currently doing I/O, such as those passed into a
+ * [class@Server] and are currently doing I/O, such as those passed into a
  * [callback@ServerCallback] or emitted in a [signal@Server::request-read]
  * signal.
  *
@@ -1922,7 +1928,7 @@ soup_server_pause_message (SoupServer        *server,
  * I/O won't actually resume until you return to the main loop.
  *
  * This must only be called on a [class@ServerMessage] which was created by the
- * #SoupServer and are currently doing I/O, such as those passed into a
+ * [class@Server] and are currently doing I/O, such as those passed into a
  * [callback@ServerCallback] or emitted in a [signal@Server::request-read]
  * signal.
  *

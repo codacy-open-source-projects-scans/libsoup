@@ -169,6 +169,7 @@ parse_date (const char **val_p)
 }
 
 #define MAX_AGE_CAP_IN_SECONDS 31536000  // 1 year
+#define MAX_ATTRIBUTE_SIZE 1024
 
 static SoupCookie *
 parse_one_cookie (const char *header, GUri *origin)
@@ -198,6 +199,16 @@ parse_one_cookie (const char *header, GUri *origin)
 	/* Parse the VALUE */
 	cookie->value = parse_value (&p, TRUE);
 
+        if (!*cookie->name && !*cookie->value) {
+            soup_cookie_free (cookie);
+            return NULL;
+        }
+
+	if (strlen (cookie->name) + strlen (cookie->value) > 4096) {
+		soup_cookie_free (cookie);
+		return NULL;
+	}
+
 	/* Parse attributes */
 	while (*p == ';') {
 		start = skip_lws (p + 1);
@@ -209,8 +220,13 @@ parse_one_cookie (const char *header, GUri *origin)
 #define MATCH_NAME(name) ((end - start == strlen (name)) && !g_ascii_strncasecmp (start, name, end - start))
 
 		if (MATCH_NAME ("domain") && has_value) {
+                        char *new_domain = parse_value (&p, TRUE);
+                        if (strlen (new_domain) > MAX_ATTRIBUTE_SIZE) {
+                            g_free (new_domain);
+                            continue;
+                        }
 			g_free (cookie->domain);
-			cookie->domain = parse_value (&p, TRUE);
+			cookie->domain = g_steal_pointer (&new_domain);
 			if (!*cookie->domain) {
 				g_free (cookie->domain);
 				cookie->domain = NULL;
@@ -224,6 +240,10 @@ parse_one_cookie (const char *header, GUri *origin)
 				parse_value (&p, FALSE);
 		} else if (MATCH_NAME ("max-age") && has_value) {
 			char *max_age_str = parse_value (&p, TRUE), *mae;
+                        if (strlen (max_age_str) > MAX_ATTRIBUTE_SIZE) {
+                            g_free (max_age_str);
+                            continue;
+                        }
 			long max_age = strtol (max_age_str, &mae, 10);
 			if (!*mae) {
 				if (max_age < 0)
@@ -234,8 +254,13 @@ parse_one_cookie (const char *header, GUri *origin)
 			}
 			g_free (max_age_str);
 		} else if (MATCH_NAME ("path") && has_value) {
+                        char *new_path = parse_value (&p, TRUE);
+                        if (strlen (new_path) > MAX_ATTRIBUTE_SIZE) {
+                            g_free (new_path);
+                            continue;
+                        }
 			g_free (cookie->path);
-			cookie->path = parse_value (&p, TRUE);
+			cookie->path = g_steal_pointer (&new_path);
 			if (*cookie->path != '/') {
 				g_free (cookie->path);
 				cookie->path = NULL;
@@ -355,7 +380,7 @@ cookie_new_internal (const char *name, const char *value,
  * @path: cookie path, or %NULL
  * @max_age: max age of the cookie, or -1 for a session cookie
  *
- * Creates a new #SoupCookie with the given attributes.
+ * Creates a new [struct@Cookie] with the given attributes.
  *
  * Use [method@Cookie.set_secure] and [method@Cookie.set_http_only] if you
  * need to set those attributes on the returned cookie.
@@ -404,14 +429,14 @@ soup_cookie_new (const char *name, const char *value,
  * @header: a cookie string (eg, the value of a Set-Cookie header)
  * @origin: (nullable): origin of the cookie
  *
- * Parses @header and returns a #SoupCookie.
+ * Parses @header and returns a [struct@Cookie].
  *
  * If @header contains multiple cookies, only the first one will be parsed.
  *
  * If @header does not have "path" or "domain" attributes, they will
  * be defaulted from @origin. If @origin is %NULL, path will default
  * to "/", but domain will be left as %NULL. Note that this is not a
- * valid state for a #SoupCookie, and you will need to fill in some
+ * valid state for a [struct@Cookie], and you will need to fill in some
  * appropriate string for the domain if you want to actually make use
  * of the cookie.
  *
@@ -733,12 +758,13 @@ serialize_cookie (SoupCookie *cookie, GString *header, gboolean set_cookie)
 
 	if (cookie->expires) {
 		char *timestamp;
-
-		g_string_append (header, "; expires=");
 		timestamp = soup_date_time_to_string (cookie->expires,
 						      SOUP_DATE_COOKIE);
-		g_string_append (header, timestamp);
-		g_free (timestamp);
+                if (timestamp) {
+                        g_string_append (header, "; expires=");
+                        g_string_append (header, timestamp);
+                        g_free (timestamp);
+                }
 	}
 	if (cookie->path) {
 		g_string_append (header, "; path=");
@@ -907,7 +933,7 @@ soup_cookies_from_response (SoupMessage *msg)
  * `SoupCookie`s.
  *
  * As the "Cookie" header, unlike "Set-Cookie", only contains cookie names and
- * values, none of the other #SoupCookie fields will be filled in. (Thus, you
+ * values, none of the other [struct@Cookie] fields will be filled in. (Thus, you
  * can't generally pass a cookie returned from this method directly to
  * [func@cookies_to_response].)
  *
@@ -944,7 +970,7 @@ soup_cookies_from_request (SoupMessage *msg)
 
 /**
  * soup_cookies_to_response:
- * @cookies: (element-type SoupCookie): a #GSList of #SoupCookie
+ * @cookies: (element-type SoupCookie): a #GSList of [struct@Cookie]
  * @msg: a #SoupMessage
  *
  * Appends a "Set-Cookie" response header to @msg for each cookie in
@@ -971,7 +997,7 @@ soup_cookies_to_response (GSList *cookies, SoupMessage *msg)
 
 /**
  * soup_cookies_to_request:
- * @cookies: (element-type SoupCookie): a #GSList of #SoupCookie
+ * @cookies: (element-type SoupCookie): a #GSList of [struct@Cookie]
  * @msg: a #SoupMessage
  *
  * Adds the name and value of each cookie in @cookies to @msg's
@@ -999,7 +1025,7 @@ soup_cookies_to_request (GSList *cookies, SoupMessage *msg)
 
 /**
  * soup_cookies_free: (skip)
- * @cookies: (element-type SoupCookie): a #GSList of #SoupCookie
+ * @cookies: (element-type SoupCookie): a #GSList of [struct@Cookie]
  *
  * Frees @cookies.
  **/
@@ -1011,9 +1037,9 @@ soup_cookies_free (GSList *cookies)
 
 /**
  * soup_cookies_to_cookie_header:
- * @cookies: (element-type SoupCookie): a #GSList of #SoupCookie
+ * @cookies: (element-type SoupCookie): a #GSList of [struct@Cookie]
  *
- * Serializes a [struct@GLib.SList] of #SoupCookie into a string suitable for
+ * Serializes a [struct@GLib.SList] of [struct@Cookie] into a string suitable for
  * setting as the value of the "Cookie" header.
  *
  * Returns: the serialization of @cookies

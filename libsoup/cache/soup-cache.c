@@ -67,7 +67,7 @@ static void soup_cache_session_feature_init (SoupSessionFeatureInterface *featur
 static SoupContentProcessorInterface *soup_cache_default_content_processor_interface;
 static void soup_cache_content_processor_init (SoupContentProcessorInterface *interface, gpointer interface_data);
 
-#define DEFAULT_MAX_SIZE 50 * 1024 * 1024
+#define DEFAULT_MAX_SIZE (50 * 1024 * 1024)
 #define MAX_ENTRY_DATA_PERCENTAGE 10 /* Percentage of the total size
 	                                of the cache that can be
 	                                filled by a single entry */
@@ -1295,7 +1295,7 @@ soup_cache_has_response (SoupCache *cache, SoupMessage *msg)
  *
  * Calculates whether the @msg can be cached or not.
  *
- * Returns: a #SoupCacheability value indicating whether the @msg can be cached
+ * Returns: a [flags@Cacheability] value indicating whether the @msg can be cached
  *   or not.
  */
 SoupCacheability
@@ -1406,7 +1406,7 @@ clear_cache_files (SoupCache *cache)
  *
  * Will remove all entries in the @cache plus all the cache files.
  *
- * This is not thread safe and must be called only from the thread that created the #SoupCache
+ * This is not thread safe and must be called only from the thread that created the [class@Cache]
  */
 void
 soup_cache_clear (SoupCache *cache)
@@ -1568,7 +1568,7 @@ pack_entry (gpointer data,
  * You must call this before exiting if you want your cache data to
  * persist between sessions.
  *
- * This is not thread safe and must be called only from the thread that created the #SoupCache
+ * This is not thread safe and must be called only from the thread that created the [class@Cache]
  */
 void
 soup_cache_dump (SoupCache *cache)
@@ -1631,7 +1631,7 @@ insert_cache_file (SoupCache *cache, const char *name, GHashTable *leaked_entrie
  *
  * Loads the contents of @cache's index into memory.
  *
- * This is not thread safe and must be called only from the thread that created the #SoupCache
+ * This is not thread safe and must be called only from the thread that created the [class@Cache]
  */
 void
 soup_cache_load (SoupCache *cache)

@@ -745,7 +745,7 @@ soup_server_message_io_http2_send_response (SoupServerMessageIOHTTP2 *io,
         nghttp2_data_provider data_provider;
         data_provider.source.ptr = soup_server_message_get_response_body (msg);
         data_provider.read_callback = on_data_source_read_callback;
-        nghttp2_submit_response (io->session, msg_io->stream_id, (const nghttp2_nv *)headers->data, headers->len, &data_provider);
+        NGCHECK (nghttp2_submit_response (io->session, msg_io->stream_id, (const nghttp2_nv *)headers->data, headers->len, &data_provider));
         io_try_write (io);
         g_array_free (headers, TRUE);
         g_free (status);
@@ -771,9 +771,18 @@ on_frame_recv_callback (nghttp2_session     *session,
                 char *uri_string;
                 GUri *uri;
 
-                uri_string = g_strdup_printf ("%s://%s%s", msg_io->scheme, msg_io->authority, msg_io->path);
+                if (msg_io->authority == NULL) {
+                        io->in_callback--;
+                        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+                }
+                /* RFC 5740: the CONNECT has unset the "scheme" and "path", but the GUri requires the scheme, thus let it be "(null)" */
+                uri_string = g_strdup_printf ("%s://%s%s", msg_io->scheme, msg_io->authority, msg_io->path == NULL ? "" : msg_io->path);
                 uri = g_uri_parse (uri_string, SOUP_HTTP_URI_FLAGS, NULL);
                 g_free (uri_string);
+                if (uri == NULL) {
+                        io->in_callback--;
+                        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+                }
                 soup_server_message_set_uri (msg_io->msg, uri);
                 g_uri_unref (uri);
 

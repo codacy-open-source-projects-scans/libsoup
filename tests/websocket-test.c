@@ -69,7 +69,7 @@ on_error_copy (SoupWebsocketConnection *ws,
                gpointer user_data)
 {
 	GError **copy = user_data;
-	g_assert (*copy == NULL);
+	g_assert_null (*copy);
 	*copy = g_error_copy (error);
 }
 
@@ -151,7 +151,7 @@ got_connection (GSocket *listener,
 	g_assert_no_error (error);
 
 	conn = g_socket_connection_factory_create_connection (sock);
-	g_assert (conn != NULL);
+	g_assert_nonnull (conn);
 	g_object_unref (sock);
 
 	if (test->no_server)
@@ -360,8 +360,8 @@ on_text_message (SoupWebsocketConnection *ws,
 	GBytes **receive = user_data;
 
 	g_assert_cmpint (type, ==, SOUP_WEBSOCKET_DATA_TEXT);
-	g_assert (*receive == NULL);
-	g_assert (message != NULL);
+	g_assert_null (*receive);
+	g_assert_nonnull (message);
 
 	*receive = g_bytes_ref (message);
 }
@@ -375,8 +375,8 @@ on_binary_message (SoupWebsocketConnection *ws,
 	GBytes **receive = user_data;
 
 	g_assert_cmpint (type, ==, SOUP_WEBSOCKET_DATA_BINARY);
-	g_assert (*receive == NULL);
-	g_assert (message != NULL);
+	g_assert_null (*receive);
+	g_assert_nonnull (message);
 
 	*receive = g_bytes_ref (message);
 }
@@ -400,7 +400,7 @@ on_close_set_flag (SoupWebsocketConnection *ws,
 {
 	gboolean *flag = user_data;
 
-	g_assert (*flag == FALSE);
+	g_assert_false (*flag);
 
 	*flag = TRUE;
 }
@@ -416,7 +416,7 @@ test_handshake (Test *test,
 
 		g_assert_nonnull (extensions);
 		g_assert_cmpuint (g_list_length (extensions), ==, 1);
-		g_assert (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (extensions->data));
+		g_assert_true (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (extensions->data));
 	} else {
 		g_assert_null (soup_websocket_connection_get_extensions (test->client));
 	}
@@ -427,7 +427,7 @@ test_handshake (Test *test,
 
                 g_assert_nonnull (extensions);
                 g_assert_cmpuint (g_list_length (extensions), ==, 1);
-                g_assert (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (extensions->data));
+                g_assert_true (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (extensions->data));
         } else {
 		g_assert_null (soup_websocket_connection_get_extensions (test->server));
 	}
@@ -515,7 +515,7 @@ test_send_client_to_server (Test *test,
 
 	WAIT_UNTIL (received != NULL);
 
-	g_assert (g_bytes_equal (sent, received));
+	g_assert_true (g_bytes_equal (sent, received));
 	g_clear_pointer (&sent, g_bytes_unref);
 	g_clear_pointer (&received, g_bytes_unref);
 }
@@ -580,7 +580,7 @@ test_send_server_to_client (Test *test,
 
         WAIT_UNTIL (received != NULL);
 
-        g_assert (g_bytes_equal (sent, received));
+        g_assert_true (g_bytes_equal (sent, received));
         g_clear_pointer (&sent, g_bytes_unref);
         g_clear_pointer (&received, g_bytes_unref);
 }
@@ -597,7 +597,7 @@ test_send_big_packets (Test *test,
 	sent = g_bytes_new_take (g_strnfill (400, '!'), 400);
 	soup_websocket_connection_send_text (test->server, g_bytes_get_data (sent, NULL));
 	WAIT_UNTIL (received != NULL);
-	g_assert (g_bytes_equal (sent, received));
+	g_assert_true (g_bytes_equal (sent, received));
 	g_bytes_unref (sent);
 	g_bytes_unref (received);
 	received = NULL;
@@ -605,20 +605,20 @@ test_send_big_packets (Test *test,
 	sent = g_bytes_new_take (g_strnfill (100 * 1000, '?'), 100 * 1000);
 	soup_websocket_connection_send_text (test->server, g_bytes_get_data (sent, NULL));
 	WAIT_UNTIL (received != NULL);
-	g_assert (g_bytes_equal (sent, received));
+	g_assert_true (g_bytes_equal (sent, received));
 	g_bytes_unref (sent);
 	g_bytes_unref (received);
 	received = NULL;
 
 	soup_websocket_connection_set_max_incoming_payload_size (test->client, 1000 * 1000 + 1);
-	g_assert (soup_websocket_connection_get_max_incoming_payload_size (test->client) == (1000 * 1000 + 1));
+	g_assert_true (soup_websocket_connection_get_max_incoming_payload_size (test->client) == (1000 * 1000 + 1));
 	soup_websocket_connection_set_max_incoming_payload_size (test->server, 1000 * 1000 + 1);
-	g_assert (soup_websocket_connection_get_max_incoming_payload_size (test->server) == (1000 * 1000 + 1));
+	g_assert_true (soup_websocket_connection_get_max_incoming_payload_size (test->server) == (1000 * 1000 + 1));
 
 	sent = g_bytes_new_take (g_strnfill (1000 * 1000, '?'), 1000 * 1000);
 	soup_websocket_connection_send_text (test->server, g_bytes_get_data (sent, NULL));
 	WAIT_UNTIL (received != NULL);
-	g_assert (g_bytes_equal (sent, received));
+	g_assert_true (g_bytes_equal (sent, received));
 	g_bytes_unref (sent);
 	g_bytes_unref (received);
 }
@@ -674,7 +674,7 @@ test_send_bad_data (Test *test,
 	frame = "\x81\x84\x00\x00\x00\x00\xEE\xEE\xEE\xEE";
 	if (!g_output_stream_write_all (g_io_stream_get_output_stream (io),
 					frame, 10, &written, NULL, NULL))
-		g_assert_not_reached ();
+		g_assert_cmpstr ("This code", ==, "should not be reached");
 	g_assert_cmpuint (written, ==, 10);
 
 	WAIT_UNTIL (error != NULL);
@@ -682,7 +682,7 @@ test_send_bad_data (Test *test,
 	g_clear_error (&error);
 
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
-	g_assert (close_event);
+	g_assert_true (close_event);
 
 	g_assert_cmpuint (soup_websocket_connection_get_close_code (test->client), ==, SOUP_WEBSOCKET_CLOSE_BAD_DATA);
 }
@@ -757,6 +757,69 @@ test_protocol_negotiate_soup (Test *test,
 
 	g_assert_cmpstr (soup_websocket_connection_get_protocol (test->client), ==, negotiated_protocol);
 	g_assert_cmpstr (soup_websocket_connection_get_protocol (test->server), ==, negotiated_protocol);
+}
+
+static void
+test_protocol_negotiate_case_sensitive_direct (Test *test,
+				gconstpointer data)
+{
+	SoupMessage *msg;
+	SoupServerMessage *server_msg;
+	SoupMessageHeaders *request_headers;
+	SoupMessageHeaders *response_headers;
+	SoupMessageHeadersIter iter;
+	const char *name, *value;
+	gboolean ok;
+	const char *protocol;
+	GError *error = NULL;
+
+	msg = soup_message_new ("GET", "http://127.0.0.1");
+	soup_websocket_client_prepare_handshake (msg, NULL,
+						 (char **) negotiate_client_protocols,
+						 NULL);
+
+	server_msg = g_object_new (SOUP_TYPE_SERVER_MESSAGE, NULL);
+	soup_server_message_set_method (server_msg, soup_message_get_method (msg));
+	soup_server_message_set_uri (server_msg, soup_message_get_uri (msg));
+	request_headers = soup_server_message_get_request_headers (server_msg);
+	soup_message_headers_iter_init (&iter, soup_message_get_request_headers (msg));
+	while (soup_message_headers_iter_next (&iter, &name, &value))
+		soup_message_headers_append (request_headers, name, value);
+	ok = soup_websocket_server_check_handshake (server_msg, NULL,
+						    (char **) negotiate_server_protocols,
+						    NULL,
+						    &error);
+	g_assert_no_error (error);
+	g_clear_error (&error);
+	g_assert_true (ok);
+
+	ok = soup_websocket_server_process_handshake (server_msg, NULL,
+						      (char **) negotiate_server_protocols,
+						      NULL, NULL);
+	g_assert_true (ok);
+
+        soup_message_set_status (msg, soup_server_message_get_status (server_msg), NULL);
+	response_headers = soup_server_message_get_response_headers (server_msg);
+	soup_message_headers_iter_init (&iter, response_headers);
+	while (soup_message_headers_iter_next (&iter, &name, &value))
+		soup_message_headers_append (soup_message_get_response_headers (msg), name, value);
+	protocol = soup_message_headers_get_one (soup_message_get_response_headers (msg), "Sec-WebSocket-Protocol");
+	g_assert_cmpstr (protocol, ==, negotiated_protocol);
+
+	// Uppercase negotiated protocol in response headers.
+	gchar* protocol_uppercase = g_ascii_strup (protocol, -1);
+	soup_message_headers_replace (soup_message_get_response_headers (msg), "Sec-WebSocket-Protocol", protocol_uppercase);
+	// Client verification must fail since server must echo the requested protocol, according to WebSocket spec.
+	ok = soup_websocket_client_verify_handshake (msg, NULL, NULL, &error);
+	g_assert_false (ok);
+	g_assert_error (error, SOUP_WEBSOCKET_ERROR, SOUP_WEBSOCKET_ERROR_BAD_HANDSHAKE);
+	g_clear_error (&error);
+
+	g_free (protocol_uppercase);
+	g_object_unref (msg);
+	g_object_unref (server_msg);
+
+	teardown_direct_connection (test, data);
 }
 
 static const char *mismatch_client_protocols[] = { "ddd", NULL };
@@ -1052,8 +1115,8 @@ do_close_clean_client (Test *test,
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->server) == SOUP_WEBSOCKET_STATE_CLOSED);
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
 
-	g_assert (close_event_client);
-	g_assert (close_event_server);
+	g_assert_true (close_event_client);
+	g_assert_true (close_event_server);
 
 	g_assert_cmpint (soup_websocket_connection_get_close_code (test->client), ==, expected_sender_code);
 	g_assert_cmpstr (soup_websocket_connection_get_close_data (test->client), ==, expected_sender_reason);
@@ -1130,8 +1193,8 @@ do_close_clean_server (Test *test,
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->server) == SOUP_WEBSOCKET_STATE_CLOSED);
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
 
-	g_assert (close_event_client);
-	g_assert (close_event_server);
+	g_assert_true (close_event_client);
+	g_assert_true (close_event_server);
 
 	g_assert_cmpint (soup_websocket_connection_get_close_code (test->server), ==, expected_sender_code);
 	g_assert_cmpstr (soup_websocket_connection_get_close_data (test->server), ==, expected_sender_reason);
@@ -1219,11 +1282,11 @@ test_message_after_closing (Test *test,
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->server) == SOUP_WEBSOCKET_STATE_CLOSED);
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
 
-	g_assert (close_event_client);
-	g_assert (close_event_server);
+	g_assert_true (close_event_client);
+	g_assert_true (close_event_server);
 
-	g_assert (received != NULL);
-	g_assert (g_bytes_equal (message, received));
+	g_assert_true (received != NULL);
+	g_assert_true (g_bytes_equal (message, received));
 
 	g_bytes_unref (received);
 	g_bytes_unref (message);
@@ -1340,7 +1403,7 @@ test_close_after_timeout (Test *test,
 
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
 
-	g_assert (close_event == TRUE);
+	g_assert_true (close_event);
 
 	/* Now actually close the server side stream */
 	g_mutex_unlock (&test->mutex);
@@ -1400,7 +1463,7 @@ send_compressed_fragments_server_thread (gpointer user_data)
         GError *error = NULL;
 
         memset (&zstream, 0, sizeof(z_stream));
-        g_assert (deflateInit2 (&zstream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) == Z_OK);
+        g_assert_true (deflateInit2 (&zstream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) == Z_OK);
 
         data = g_byte_array_new ();
 
@@ -1459,7 +1522,7 @@ test_receive_fragmented (Test *test,
 
 	WAIT_UNTIL (received != NULL);
 	expect = g_bytes_new ("one two three", 13);
-	g_assert (g_bytes_equal (expect, received));
+	g_assert_true (g_bytes_equal (expect, received));
 	g_bytes_unref (expect);
 	g_bytes_unref (received);
 
@@ -1508,8 +1571,9 @@ test_receive_invalid_encode_length_16 (Test *test,
 	GError *error = NULL;
 	InvalidEncodeLengthTest context = { test, NULL };
 	guint i;
+	guint error_id;
 
-	g_signal_connect (test->client, "error", G_CALLBACK (on_error_copy), &error);
+	error_id = g_signal_connect (test->client, "error", G_CALLBACK (on_error_copy), &error);
 	g_signal_connect (test->client, "message", G_CALLBACK (on_binary_message), &received);
 
 	/* We use 126(~) as payload length with 125 extended length */
@@ -1522,6 +1586,7 @@ test_receive_invalid_encode_length_16 (Test *test,
 	WAIT_UNTIL (error != NULL || received != NULL);
 	g_assert_error (error, SOUP_WEBSOCKET_ERROR, SOUP_WEBSOCKET_CLOSE_PROTOCOL_ERROR);
 	g_clear_error (&error);
+        g_signal_handler_disconnect (test->client, error_id);
 	g_assert_null (received);
 
 	g_thread_join (thread);
@@ -1600,6 +1665,9 @@ test_client_receive_masked_frame (Test *test,
 	g_clear_error (&error);
 	g_assert_null (received);
 
+	/* it can emit more errors while joining the thread, thus disconnect, to avoid memory leak */
+	g_signal_handlers_disconnect_by_func (test->client, G_CALLBACK (on_error_copy), &error);
+
         g_thread_join (thread);
 
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
@@ -1625,7 +1693,7 @@ test_server_receive_unmasked_frame (Test *test,
 	frame = "\x81\x0bHello World";
 	if (!g_output_stream_write_all (g_io_stream_get_output_stream (io),
 					frame, 13, &written, NULL, NULL))
-		g_assert_not_reached ();
+		g_assert_cmpstr ("This code", ==, "should not be reached");
 	g_assert_cmpuint (written, ==, 13);
 
 	WAIT_UNTIL (error != NULL);
@@ -1633,7 +1701,7 @@ test_server_receive_unmasked_frame (Test *test,
 	g_clear_error (&error);
 
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
-	g_assert (close_event);
+	g_assert_true (close_event);
 
 	g_assert_cmpuint (soup_websocket_connection_get_close_code (test->client), ==, SOUP_WEBSOCKET_CLOSE_PROTOCOL_ERROR);
 
@@ -1847,7 +1915,7 @@ test_deflate_negotiate_direct (Test *test,
 								deflate_negotiate_tests[i].server_supports_extensions ?
 								supported_extensions : NULL,
 								&error);
-		g_assert (result == deflate_negotiate_tests[i].expected_check_result);
+		g_assert_true (result == deflate_negotiate_tests[i].expected_check_result);
 		if (result) {
 			g_assert_no_error (error);
 		} else {
@@ -1859,7 +1927,7 @@ test_deflate_negotiate_direct (Test *test,
 								  deflate_negotiate_tests[i].server_supports_extensions ?
 								  supported_extensions : NULL,
 								  &accepted_extensions);
-		g_assert (result == deflate_negotiate_tests[i].expected_check_result);
+		g_assert_true (result == deflate_negotiate_tests[i].expected_check_result);
 
 		soup_message_set_status (msg, soup_server_message_get_status (server_msg), NULL);
 		response_headers = soup_server_message_get_response_headers (server_msg);
@@ -1873,7 +1941,7 @@ test_deflate_negotiate_direct (Test *test,
 			g_assert_cmpstr (extension, ==, deflate_negotiate_tests[i].server_extension);
 			g_assert_nonnull (accepted_extensions);
 			g_assert_cmpuint (g_list_length (accepted_extensions), ==, 1);
-			g_assert (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (accepted_extensions->data));
+			g_assert_true (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (accepted_extensions->data));
 			g_list_free_full (accepted_extensions, g_object_unref);
 			accepted_extensions = NULL;
 		} else {
@@ -1881,7 +1949,7 @@ test_deflate_negotiate_direct (Test *test,
 		}
 
 		result = soup_websocket_client_verify_handshake (msg, supported_extensions, &accepted_extensions, &error);
-		g_assert (result == deflate_negotiate_tests[i].expected_verify_result);
+		g_assert_true (result == deflate_negotiate_tests[i].expected_verify_result);
 		if (result) {
                         g_assert_no_error (error);
                 } else {
@@ -1891,7 +1959,7 @@ test_deflate_negotiate_direct (Test *test,
 		if (deflate_negotiate_tests[i].expected_accepted_extension) {
 			g_assert_nonnull (accepted_extensions);
                         g_assert_cmpuint (g_list_length (accepted_extensions), ==, 1);
-                        g_assert (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (accepted_extensions->data));
+                        g_assert_true (SOUP_IS_WEBSOCKET_EXTENSION_DEFLATE (accepted_extensions->data));
                         g_list_free_full (accepted_extensions, g_object_unref);
                         accepted_extensions = NULL;
                 } else {
@@ -1985,7 +2053,7 @@ send_compressed_fragments_error_server_thread (gpointer user_data)
         GError *error = NULL;
 
         memset (&zstream, 0, sizeof(z_stream));
-        g_assert (deflateInit2 (&zstream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) == Z_OK);
+        g_assert_true (deflateInit2 (&zstream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) == Z_OK);
 
         data = g_byte_array_new ();
 
@@ -2048,10 +2116,13 @@ test_deflate_receive_fragmented_error (Test *test,
 	g_clear_error (&error);
 	g_assert_null (received);
 
+	/* it can emit more errors while joining the thread, thus disconnect, to avoid memory leak */
+	g_signal_handlers_disconnect_by_func (test->client, G_CALLBACK (on_error_copy), &error);
+
 	g_thread_join (thread);
 
 	WAIT_UNTIL (soup_websocket_connection_get_state (test->client) == SOUP_WEBSOCKET_STATE_CLOSED);
-	g_assert (close_event);
+	g_assert_true (close_event);
 }
 
 static void
@@ -2251,6 +2322,10 @@ main (int argc,
 	g_test_add ("/websocket/soup/protocol-negotiate", Test, NULL, NULL,
 		    test_protocol_negotiate_soup,
 		    teardown_soup_connection);
+
+	g_test_add ("/websocket/direct/protocol-negotiate-case-sensitive", Test, NULL, NULL,
+		    test_protocol_negotiate_case_sensitive_direct,
+		    NULL);
 
 	g_test_add ("/websocket/direct/protocol-mismatch", Test, NULL, NULL,
 		    test_protocol_mismatch_direct,

@@ -25,12 +25,12 @@
  *
  * Automatic cookie handling for SoupSession.
  *
- * A #SoupCookieJar stores [struct@Cookie]s and arrange for them to be sent with
- * the appropriate [class@Message]s. #SoupCookieJar implements
+ * A [class@CookieJar] stores [struct@Cookie]s and arrange for them to be sent with
+ * the appropriate [class@Message]s. [class@CookieJar] implements
  * [iface@SessionFeature], so you can add a cookie jar to a session with
  * [method@Session.add_feature] or [method@Session.add_feature_by_type].
  *
- * Note that the base #SoupCookieJar class does not support any form
+ * Note that the base [class@CookieJar] class does not support any form
  * of long-term cookie persistence.
  **/
 
@@ -168,8 +168,8 @@ soup_cookie_jar_class_init (SoupCookieJarClass *jar_class)
 	/**
 	 * SoupCookieJar::changed:
 	 * @jar: the #SoupCookieJar
-	 * @old_cookie: the old #SoupCookie value
-	 * @new_cookie: the new #SoupCookie value
+	 * @old_cookie: (nullable): the old #SoupCookie value
+	 * @new_cookie: (nullable): the new #SoupCookie value
 	 *
 	 * Emitted when @jar changes.
 	 *
@@ -225,9 +225,9 @@ soup_cookie_jar_class_init (SoupCookieJarClass *jar_class)
 /**
  * soup_cookie_jar_new:
  *
- * Creates a new #SoupCookieJar.
+ * Creates a new [class@CookieJar].
  *
- * The base #SoupCookieJar class does not support persistent storage of cookies;
+ * The base [class@CookieJar] class does not support persistent storage of cookies;
  * use a subclass for that.
  *
  * Returns: a new #SoupCookieJar
@@ -401,7 +401,7 @@ get_cookies (SoupCookieJar *jar,
  * If @for_http is %TRUE, the return value will include cookies marked
  * "HttpOnly" (that is, cookies that the server wishes to keep hidden
  * from client-side scripting operations such as the JavaScript
- * document.cookies property). Since #SoupCookieJar sets the Cookie
+ * document.cookies property). Since [class@CookieJar] sets the Cookie
  * header itself when making the actual HTTP request, you should
  * almost certainly be setting @for_http to %FALSE if you are calling
  * this.
@@ -441,12 +441,12 @@ soup_cookie_jar_get_cookies (SoupCookieJar *jar, GUri *uri,
  *   to an HTTP operation
  *
  * Retrieves the list of cookies that would be sent with a request to @uri
- * as a [struct@GLib.List] of #SoupCookie objects.
+ * as a [struct@GLib.List] of [struct@Cookie] objects.
  *
  * If @for_http is %TRUE, the return value will include cookies marked
  * "HttpOnly" (that is, cookies that the server wishes to keep hidden
  * from client-side scripting operations such as the JavaScript
- * document.cookies property). Since #SoupCookieJar sets the Cookie
+ * document.cookies property). Since [class@CookieJar] sets the Cookie
  * header itself when making the actual HTTP request, you should
  * almost certainly be setting @for_http to %FALSE if you are calling
  * this.
@@ -643,14 +643,17 @@ soup_cookie_jar_add_cookie_full (SoupCookieJar *jar, SoupCookie *cookie, GUri *u
          * which has been implemented by Firefox and Chrome. */
 #define MATCH_PREFIX(name, prefix) (!g_ascii_strncasecmp (name, prefix, strlen(prefix)))
 
+        const char *name = soup_cookie_get_name (cookie);
+        const char *value = soup_cookie_get_value (cookie);
+
 	/* Cookies with a "__Secure-" prefix should have Secure attribute set and it must be for a secure host. */
-	if (MATCH_PREFIX (soup_cookie_get_name (cookie), "__Secure-") && !soup_cookie_get_secure (cookie) ) {
+	if (MATCH_PREFIX (name, "__Secure-") && !soup_cookie_get_secure (cookie) ) {
 		soup_cookie_free (cookie);
 		return;
 	}
         /* Path=/ and Secure attributes are required; Domain attribute must not be present.
          Note that SoupCookie always sets the domain so we ensure its not a subdomain match. */
-	if (MATCH_PREFIX (soup_cookie_get_name (cookie), "__Host-")) {
+	if (MATCH_PREFIX (name, "__Host-")) {
 		if (!soup_cookie_get_secure (cookie) ||
 		    strcmp (soup_cookie_get_path (cookie), "/") != 0 ||
                     soup_cookie_get_domain (cookie)[0] == '.') {
@@ -659,12 +662,15 @@ soup_cookie_jar_add_cookie_full (SoupCookieJar *jar, SoupCookie *cookie, GUri *u
 		}
 	}
 
+        /* Cookie with an empty name impersonating a prefixed name. */
+        if (!*name && (MATCH_PREFIX (value, "__Secure-") || MATCH_PREFIX (value, "__Host-"))) {
+                soup_cookie_free (cookie);
+                return;
+        }
+
 	/* Cookies should not take control characters %x00-1F / %x7F (defined by RFC 5234) in names or values,
 	 * with the exception of %x09 (the tab character).
-	 */    
-	const char *name, *value;
-	name = soup_cookie_get_name (cookie);
-	value = soup_cookie_get_value (cookie);
+	 */
 	if (string_contains_ctrlcode (name) || string_contains_ctrlcode (value)) {
 		soup_cookie_free (cookie);
 		return;
@@ -943,6 +949,8 @@ soup_cookie_jar_session_feature_init (SoupSessionFeatureInterface *feature_inter
  * The cookies in the list are a copy of the original, so
  * you have to free them when you are done with them.
  *
+ * For historical reasons this list is in reverse order.
+ *
  * Returns: (transfer full) (element-type Soup.Cookie): a #GSList
  *   with all the cookies in the @jar.
  **/
@@ -1043,7 +1051,7 @@ soup_cookie_jar_delete_cookie (SoupCookieJar *jar,
  *   from that page, reject any cookie that it could try to set unless it
  *   already has a cookie in the cookie jar. For libsoup to be able to tell
  *   apart first party cookies from the rest, the application must call
- *   [method@Message.set_first_party] on each outgoing #SoupMessage, setting the
+ *   [method@Message.set_first_party] on each outgoing [class@Message], setting the
  *   [struct@GLib.Uri] of the main document. If no first party is set in a
  *   message when this policy is in effect, cookies will be assumed to be third
  *   party by default.

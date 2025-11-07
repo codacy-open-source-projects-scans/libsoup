@@ -34,6 +34,9 @@ typedef struct {
 #define LARGE_N_CHARS 24
 #define LARGE_CHARS_REPEAT 1024
 
+// This just needs to be larger than our default window size in soup-connection.c
+#define REALLY_LARGE_BUFFER_SIZE 62914600
+
 static void
 setup_session (Test *test, gconstpointer data)
 {
@@ -553,6 +556,103 @@ do_paused_async_test (Test *test, gconstpointer data)
         g_uri_unref (uri);
 }
 
+static void
+on_send_for_buffer_test (GObject *object, GAsyncResult *result, gpointer user_data)
+{
+        SoupSession *session = SOUP_SESSION (object);
+        GError *error = NULL;
+        GInputStream **stream_out = user_data;
+
+        *stream_out = soup_session_send_finish (session, result, &error);
+
+        g_assert_no_error (error);
+        g_assert_nonnull (*stream_out);
+}
+
+static SoupBodyInputStreamHttp2 *
+get_body_stream_from_response (GInputStream *stream)
+{
+       return SOUP_BODY_INPUT_STREAM_HTTP2 (g_filter_input_stream_get_base_stream (G_FILTER_INPUT_STREAM (stream))); 
+}
+
+static void
+read_until_end_for_buffer_test (GObject *object, GAsyncResult *result, gpointer user_data)
+{
+        gboolean *finished = user_data;
+	gssize nread;
+        static char buffer[10240];
+
+	nread = g_input_stream_read_finish (G_INPUT_STREAM (object), result, NULL);
+        if (nread > 0) {
+                g_input_stream_read_async (G_INPUT_STREAM (object), buffer, sizeof (buffer), G_PRIORITY_DEFAULT, NULL, read_until_end_for_buffer_test, user_data);
+                return;
+        }
+
+        g_assert_cmpint (nread, ==, 0);
+        *finished = TRUE;
+}
+
+static void
+on_read_for_buffer_test (GObject *object, GAsyncResult *result, gpointer user_data)
+{
+	gssize *nread = user_data;
+
+	*nread = g_input_stream_read_finish (G_INPUT_STREAM (object), result, NULL);
+        g_assert_cmpint (*nread, >, 0);
+}
+
+static void
+do_flow_control_buffer_sizes (Test *test, gconstpointer data)
+{
+        GUri *uri;
+        SoupMessage *large_msg;
+        SoupMessage *small_msg;
+        GBytes *small_response;
+        GInputStream *response_stream = NULL;
+        static char buffer[1024] = { 0 };
+        gssize read_bytes = 0;
+        gsize buffer_size = 0;
+        gboolean finished = FALSE;
+
+        uri = g_uri_parse_relative (base_uri, "/larger-than-window", SOUP_HTTP_URI_FLAGS, NULL);
+        large_msg = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
+        g_uri_unref (uri);
+        soup_session_send_async (test->session, large_msg, G_PRIORITY_DEFAULT, NULL, on_send_for_buffer_test, &response_stream);
+        while (!response_stream)
+                g_main_context_iteration (g_main_context_default(), TRUE);
+
+        g_input_stream_read_async (response_stream, buffer, sizeof (buffer), G_PRIORITY_DEFAULT, NULL, on_read_for_buffer_test, &read_bytes);
+        while (read_bytes == 0)
+                g_main_context_iteration (g_main_context_default(), TRUE);
+
+
+        buffer_size = soup_body_input_stream_http2_get_buffer_size (get_body_stream_from_response (response_stream));
+        // We have not already buffered the whole response.
+        g_assert_cmpint (buffer_size, <, REALLY_LARGE_BUFFER_SIZE);
+
+        uri = g_uri_parse_relative (base_uri, "/large", SOUP_HTTP_URI_FLAGS, NULL);
+        small_msg = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
+        g_uri_unref (uri);
+        small_response = soup_session_send_and_read (test->session, small_msg, NULL, NULL);
+        g_assert_nonnull(small_response);
+        g_bytes_unref (small_response);
+        g_object_unref (small_msg);
+
+        // The buffer could grow a little but shouldn't buffer the whole thing still.
+        buffer_size = soup_body_input_stream_http2_get_buffer_size (get_body_stream_from_response (response_stream));
+        g_assert_cmpint (buffer_size, <, REALLY_LARGE_BUFFER_SIZE);
+
+        g_input_stream_read_async (response_stream, buffer, sizeof (buffer), G_PRIORITY_DEFAULT, NULL, read_until_end_for_buffer_test, &finished);
+        while (!finished)
+                g_main_context_iteration (g_main_context_default(), TRUE);
+
+        // Entire buffer was read.
+        g_assert_cmpint (0, ==, soup_body_input_stream_http2_get_buffer_size (get_body_stream_from_response (response_stream)));
+
+        g_object_unref (large_msg);
+        g_object_unref (response_stream);
+}
+
 typedef struct {
         int connection;
         int stream;
@@ -679,10 +779,10 @@ do_connections_test (Test *test, gconstpointer data)
         guint complete_count = 0;
         GUri *uri;
 
-        if (g_getenv ("ASAN_OPTIONS")) {
-                g_test_skip ("Flakey on asan GitLab runner");
-                return;
-        }
+#ifdef __SANITIZE_ADDRESS__
+        g_test_skip ("Flakey on asan GitLab runner");
+        return;
+#endif
 
         async_context = g_main_context_ref_thread_default ();
 
@@ -760,6 +860,7 @@ do_logging_test (Test *test, gconstpointer data)
         SoupLogger *logger = soup_logger_new (SOUP_LOGGER_LOG_BODY);
         soup_logger_set_printer (logger, log_printer, &has_logged_body, NULL);
         soup_session_add_feature (test->session, SOUP_SESSION_FEATURE (logger));
+        g_clear_object (&logger);
 
         uri = g_uri_parse_relative (base_uri, "/echo_post", SOUP_HTTP_URI_FLAGS, NULL);
         msg = soup_message_new_from_uri (SOUP_METHOD_POST, uri);
@@ -771,6 +872,7 @@ do_logging_test (Test *test, gconstpointer data)
         g_assert_true (has_logged_body);
 
         g_bytes_unref (response);
+        g_bytes_unref (bytes);
         g_object_unref (msg);
         g_uri_unref (uri);
 }
@@ -1078,7 +1180,7 @@ do_invalid_header_rfc9113_received_test (Test *test, gconstpointer data)
 
         g_assert_nonnull (response);
         g_assert_no_error (error);
-        g_clear_error (&error);
+        g_bytes_unref (response);
         g_object_unref (msg);
         g_uri_unref (uri);
 }
@@ -1119,6 +1221,7 @@ static void
 do_one_sniffer_test (SoupSession  *session,
                      const char   *path,
                      gsize         expected_size,
+                     const char   *expected_type,
                      gboolean      should_sniff,
                      GMainContext *async_context)
 {
@@ -1152,7 +1255,7 @@ do_one_sniffer_test (SoupSession  *session,
         if (should_sniff) {
                 soup_test_assert (g_object_get_data (G_OBJECT (msg), "content-sniffed") != NULL,
                                   "content-sniffed did not get emitted");
-                g_assert_cmpstr (sniffed_type, ==, "text/plain");
+                g_assert_cmpstr (sniffed_type, ==, expected_type);
         } else {
                 soup_test_assert (g_object_get_data (G_OBJECT (msg), "content-sniffed") == NULL,
                                   "content-sniffed got emitted without a sniffer");
@@ -1178,9 +1281,11 @@ do_sniffer_async_test (Test *test, gconstpointer data)
         if (should_content_sniff)
                 soup_session_add_feature_by_type (test->session, SOUP_TYPE_CONTENT_SNIFFER);
 
-        do_one_sniffer_test (test->session, "/", 11, should_content_sniff, async_context);
-        do_one_sniffer_test (test->session, "/large", (LARGE_N_CHARS * LARGE_CHARS_REPEAT) + 1, should_content_sniff, async_context);
-        do_one_sniffer_test (test->session, "/no-content", 0, should_content_sniff, async_context);
+        do_one_sniffer_test (test->session, "/", 11, "text/plain", should_content_sniff, async_context);
+        do_one_sniffer_test (test->session, "/large", (LARGE_N_CHARS * LARGE_CHARS_REPEAT) + 1, "text/plain", should_content_sniff, async_context);
+        do_one_sniffer_test (test->session, "/no-content", 0, "text/plain", should_content_sniff, async_context);
+        do_one_sniffer_test (test->session, "/no-content-but-has-content-type", 0, "text/javascript", should_content_sniff, async_context);
+        do_one_sniffer_test (test->session, "/empty-but-has-content-type", 0, "text/javascript", should_content_sniff, async_context);
 
         g_main_context_unref (async_context);
 }
@@ -1193,9 +1298,12 @@ do_sniffer_sync_test (Test *test, gconstpointer data)
         if (should_content_sniff)
                 soup_session_add_feature_by_type (test->session, SOUP_TYPE_CONTENT_SNIFFER);
 
-        do_one_sniffer_test (test->session, "/", 11, should_content_sniff, NULL);
-        do_one_sniffer_test (test->session, "/large", (LARGE_N_CHARS * LARGE_CHARS_REPEAT) + 1, should_content_sniff, NULL);
-        do_one_sniffer_test (test->session, "/no-content", 0, should_content_sniff, NULL);
+        do_one_sniffer_test (test->session, "/", 11, "text/plain", should_content_sniff, NULL);
+        do_one_sniffer_test (test->session, "/large", (LARGE_N_CHARS * LARGE_CHARS_REPEAT) + 1, "text/plain", should_content_sniff, NULL);
+        do_one_sniffer_test (test->session, "/no-content", 0, "text/plain", should_content_sniff, NULL);
+        do_one_sniffer_test (test->session, "/no-content-but-has-content-type", 0, "text/javascript", should_content_sniff, NULL);
+        do_one_sniffer_test (test->session, "/empty-but-has-content-type", 0, "text/javascript", should_content_sniff, NULL);
+
 }
 
 static void
@@ -1213,6 +1321,7 @@ do_timeout_test (Test *test, gconstpointer data)
         response = soup_test_session_async_send (test->session, msg, NULL, &error);
         g_assert_null (response);
         g_assert_error (error, G_IO_ERROR, G_IO_ERROR_TIMED_OUT);
+        g_clear_error (&error);
         g_object_unref (msg);
         g_uri_unref (uri);
 }
@@ -1233,6 +1342,30 @@ do_connection_closed_test (Test *test, gconstpointer data)
         g_clear_object (&stream);
         g_object_unref (msg);
         g_uri_unref (uri);
+}
+
+static void
+do_broken_pseudo_header_test (Test *test, gconstpointer data)
+{
+	char *path;
+	SoupMessage *msg;
+	GUri *uri;
+	GBytes *body = NULL;
+	GError *error = NULL;
+
+	uri = g_uri_parse_relative (base_uri, "/ag", SOUP_HTTP_URI_FLAGS, NULL);
+
+	/* an ugly cheat to construct a broken URI, which can be sent from other libs */
+	path = (char *) g_uri_get_path (uri);
+	path[1] = '%';
+
+	msg = soup_message_new_from_uri (SOUP_METHOD_GET, uri);
+	body = soup_test_session_async_send (test->session, msg, NULL, &error);
+	g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+	g_assert_null (body);
+	g_clear_error (&error);
+	g_object_unref (msg);
+	g_uri_unref (uri);
 }
 
 static gboolean
@@ -1271,6 +1404,14 @@ server_handler (SoupServer        *server,
                 }
         } else if (strcmp (path, "/no-content") == 0) {
                 soup_server_message_set_status (msg, SOUP_STATUS_NO_CONTENT, NULL);
+        } else if (strcmp (path, "/no-content-but-has-content-type") == 0) {
+                soup_message_headers_set_content_type (soup_server_message_get_response_headers (msg), "text/javascript", NULL);
+                soup_server_message_set_status (msg, SOUP_STATUS_NO_CONTENT, NULL);
+        } else if (strcmp (path, "/empty-but-has-content-type") == 0) {
+                soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
+                soup_server_message_set_response (msg, "text/javascript",
+                                                  SOUP_MEMORY_STATIC,
+                                                  NULL, 0);
         } else if (strcmp (path, "/large") == 0) {
                 int i, j;
                 SoupMessageBody *response_body;
@@ -1280,12 +1421,25 @@ server_handler (SoupServer        *server,
                 response_body = soup_server_message_get_response_body (msg);
                 for (i = 0; i < LARGE_N_CHARS; i++, letter++) {
                         GString *chunk = g_string_new (NULL);
+                        GBytes *bytes;
 
                         for (j = 0; j < LARGE_CHARS_REPEAT; j++)
                                 chunk = g_string_append_c (chunk, letter);
-                        soup_message_body_append_bytes (response_body, g_string_free_to_bytes (chunk));
+
+                        bytes = g_string_free_to_bytes (chunk);
+                        soup_message_body_append_bytes (response_body, bytes);
+                        g_bytes_unref (bytes);
                 }
                 soup_message_body_append (response_body, SOUP_MEMORY_STATIC, "\0", 1);
+
+                soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
+        } else if (strcmp (path, "/larger-than-window") == 0) {
+                char *big_data = g_malloc0 (REALLY_LARGE_BUFFER_SIZE);
+                GBytes *bytes = g_bytes_new_take (big_data, REALLY_LARGE_BUFFER_SIZE);
+
+                SoupMessageBody *response_body = soup_server_message_get_response_body (msg);
+                soup_message_body_append_bytes (response_body, bytes);
+                g_bytes_unref (bytes);
 
                 soup_server_message_set_status (msg, SOUP_STATUS_OK, NULL);
         } else if (strcmp (path, "/echo_query") == 0) {
@@ -1449,13 +1603,17 @@ main (int argc, char **argv)
                     setup_session,
                     do_flow_control_large_test,
                     teardown_session);
-        g_test_add ("/http2/flow-control/large/sync", Test, GINT_TO_POINTER (TRUE),
+        g_test_add ("/http2/flow-control/large/sync", Test, GINT_TO_POINTER (FALSE),
                     setup_session,
                     do_flow_control_large_test,
                     teardown_session);
         g_test_add ("/http2/flow-control/multiplex/async", Test, NULL,
                     setup_session,
                     do_flow_control_multi_message_async_test,
+                    teardown_session);
+        g_test_add ("/http2/flow-control/buffer-size", Test, NULL,
+                    setup_session,
+                    do_flow_control_buffer_sizes,
                     teardown_session);
         g_test_add ("/http2/connections", Test, NULL,
                     setup_session,
@@ -1534,6 +1692,10 @@ main (int argc, char **argv)
         g_test_add ("/http2/connection-closed", Test, NULL,
                     setup_session,
                     do_connection_closed_test,
+                    teardown_session);
+        g_test_add ("/http2/broken-pseudo-header", Test, NULL,
+                    setup_session,
+                    do_broken_pseudo_header_test,
                     teardown_session);
 
 	ret = g_test_run ();

@@ -6,6 +6,15 @@ typedef struct {
 	const char *name, *value;
 } Header;
 
+/* These are not C strings to ensure going one byte over is not safe. */
+static char unterminated_http_version[] = {
+        'G','E','T',' ','/',' ','H','T','T','P','/','1', '0', '0', '.'
+};
+
+static char only_newlines[] = {
+        '\n', '\n', '\n', '\n'
+};
+
 static struct RequestTest {
 	const char *description;
 	const char *bugref;
@@ -383,6 +392,13 @@ static struct RequestTest {
 	  { { NULL } }
 	},
 
+	{ "Long HTTP version terminating at missing minor version", "https://gitlab.gnome.org/GNOME/libsoup/-/issues/404",
+	  unterminated_http_version, sizeof (unterminated_http_version),
+	  SOUP_STATUS_BAD_REQUEST,
+           NULL, NULL, -1,
+	  { { NULL } }
+	},
+
 	{ "Non-HTTP request", NULL,
 	  "GET / SOUP/1.1\r\nHost: example.com\r\n", -1,
 	  SOUP_STATUS_BAD_REQUEST,
@@ -442,6 +458,31 @@ static struct RequestTest {
 
 	{ "NUL in header value", NULL,
 	  "HTTP/1.1 200 OK\r\nFoo: b\x00" "ar\r\n", 28,
+	  SOUP_STATUS_BAD_REQUEST,
+           NULL, NULL, -1,
+	  { { NULL } }
+	},
+
+	{ "CR and LF were incorrectly permitted within request URIs",
+	  "https://gitlab.gnome.org/GNOME/libsoup/-/issues/380",
+	  "GET /\r\n HTTP/1.1\r\nHost: example.com\r\n",
+	  -1,
+	  SOUP_STATUS_BAD_REQUEST,
+	  NULL, NULL, -1,
+	  { { NULL } }
+	},
+
+	{ "CR and LF incorrectly allowed in request method",
+	  "https://gitlab.gnome.org/GNOME/libsoup/-/issues/441",
+	  "G\r\nET / HTTP/1.1\r\nHost: example.com\r\n",
+	  -1,
+	  SOUP_STATUS_BAD_REQUEST,
+	  NULL, NULL, -1,
+	  { { NULL } }
+	},
+
+	{ "Only newlines", NULL,
+	  only_newlines, sizeof (only_newlines),
 	  SOUP_STATUS_BAD_REQUEST,
            NULL, NULL, -1,
 	  { { NULL } }
@@ -856,7 +897,7 @@ check_headers (Header *headers, SoupMessageHeaders *hdrs)
 	}
 
 	for (i = 0, h = header_names; headers[i].name && h; i++, h = h->next) {
-		g_assert (g_ascii_strcasecmp (h->data, headers[i].name) == 0);
+		g_assert_true (g_ascii_strcasecmp (h->data, headers[i].name) == 0);
 
 		value = soup_message_headers_get_list (hdrs, headers[i].name);
 		g_assert_cmpstr (value, ==, headers[i].value);
@@ -1039,6 +1080,7 @@ do_param_list_tests (void)
 #define RFC5987_TEST_HEADER_FALLBACK "attachment; filename*=Unknown''t%FF%FF%FFst.txt; filename=\"test.txt\""
 #define RFC5987_TEST_HEADER_NO_TYPE  "filename=\"test.txt\""
 #define RFC5987_TEST_HEADER_NO_TYPE_2  "filename=\"test.txt\"; foo=bar"
+#define RFC5987_TEST_HEADER_EMPTY_FILENAME ";filename"
 
 static void
 do_content_disposition_tests (void)
@@ -1137,6 +1179,20 @@ do_content_disposition_tests (void)
 	g_assert_cmpstr (filename, ==, RFC5987_TEST_FALLBACK_FILENAME);
         parameter2 = g_hash_table_lookup (params, "foo");
         g_assert_cmpstr (parameter2, ==, "bar");
+	g_hash_table_destroy (params);
+
+        /* Empty filename */
+        soup_message_headers_clear (hdrs);
+        soup_message_headers_append (hdrs, "Content-Disposition",
+				     RFC5987_TEST_HEADER_EMPTY_FILENAME);
+	if (!soup_message_headers_get_content_disposition (hdrs,
+							   &disposition,
+							   &params)) {
+		soup_test_assert (FALSE, "empty filename decoding FAILED");
+		return;
+	}
+        g_free (disposition);
+        g_assert_false (g_hash_table_contains (params, "filename"));
 	g_hash_table_destroy (params);
 
 	soup_message_headers_unref (hdrs);
@@ -1276,6 +1332,31 @@ do_bad_header_tests (void)
 	soup_message_headers_unref (hdrs);
 }
 
+static const struct {
+	const char *description, *name, *value;
+} case_sensitive_headers[] = {
+	{ "Sec-WebSocket-Protocol is case sensitive", "Sec-WebSocket-Protocol", "foo,bar,qux" },
+};
+
+static void
+do_case_sensitive_header_tests (void)
+{
+	int i;
+
+	const char* token = "foo";
+	for (i = 0; i < G_N_ELEMENTS (case_sensitive_headers); i++) {
+		const char* value = case_sensitive_headers[i].value;
+		char* token_uppercase = g_ascii_strup (token, -1);
+
+		g_assert_true (soup_header_contains (value, token));
+		g_assert_true (soup_header_contains (value, token_uppercase));
+		g_assert_true (soup_header_contains_case_sensitive (value, token));
+		g_assert_false (soup_header_contains_case_sensitive (value, token_uppercase));
+
+		g_free (token_uppercase);
+	}
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1291,6 +1372,7 @@ main (int argc, char **argv)
 	g_test_add_func ("/header-parsing/content-type", do_content_type_tests);
 	g_test_add_func ("/header-parsing/append-param", do_append_param_tests);
 	g_test_add_func ("/header-parsing/bad", do_bad_header_tests);
+	g_test_add_func ("/header-parsing/case-sensitive", do_case_sensitive_header_tests);
 
 	ret = g_test_run ();
 
