@@ -22,6 +22,8 @@
 
 #include <string.h>
 
+#include <glib/gi18n-lib.h>
+
 #include "soup-websocket-connection.h"
 #include "soup-websocket-connection-private.h"
 #include "soup-enum-types.h"
@@ -168,11 +170,34 @@ typedef struct {
 #define MAX_INCOMING_PAYLOAD_SIZE_DEFAULT   128 * 1024
 #define READ_BUFFER_SIZE 1024
 #define MASK_LENGTH 4
+#define MAX_FRAME_HEADER_SIZE (10 + MASK_LENGTH)
+
+/* Incoming frames are buffered in a GByteArray, which uses guint lengths and
+ * whose growth is not safe beyond G_MAXINT on all supported GLib versions.
+ * Leave room for the largest possible frame header and one extra read.
+ */
+#define MAX_INCOMING_PAYLOAD_SIZE ((guint64)G_MAXINT - MAX_FRAME_HEADER_SIZE - READ_BUFFER_SIZE)
+
+/* Likewise for a reassembled message and for an outgoing frame, which are
+ * also built in GByteArrays. Extensions may expand a frame's payload, so the
+ * incoming cap above does not bound these on its own.
+ */
+#define MAX_MESSAGE_SIZE ((guint64)G_MAXINT - 1)
+#define MAX_OUTGOING_PAYLOAD_SIZE ((gsize)G_MAXINT - MAX_FRAME_HEADER_SIZE)
+
+static void too_big_outgoing_payload_error_and_close (SoupWebsocketConnection *self,
+                                                      gsize                    len);
 
 /* If a pong payload begins with these bytes, we assume it is a pong from one of
  * our keepalive pings.
  */
 #define KEEPALIVE_PAYLOAD_PREFIX "libsoup-keepalive-"
+
+/* RFC 6455 5.5.3 allows an endpoint to skip responding to a ping if it is
+ * already flooded. Cap how many unsolicited pongs may sit unsent so a ping
+ * flood cannot grow priv->outgoing (and its per-insert cost) without bound.
+ */
+#define MAX_PENDING_PONGS 64
 
 G_DEFINE_FINAL_TYPE_WITH_PRIVATE (SoupWebsocketConnection, soup_websocket_connection, G_TYPE_OBJECT)
 
@@ -335,8 +360,7 @@ soup_websocket_connection_stop_input_source (SoupWebsocketConnection *self)
 	if (priv->input_source) {
 		g_debug ("stopping input source");
 		g_source_destroy (priv->input_source);
-		g_source_unref (priv->input_source);
-		priv->input_source = NULL;
+		g_clear_pointer (&priv->input_source, g_source_unref);
 	}
 }
 
@@ -362,8 +386,7 @@ soup_websocket_connection_stop_output_source (SoupWebsocketConnection *self)
 	if (priv->output_source) {
 		g_debug ("stopping output source");
 		g_source_destroy (priv->output_source);
-		g_source_unref (priv->output_source);
-		priv->output_source = NULL;
+		g_clear_pointer (&priv->output_source, g_source_unref);
 	}
 }
 
@@ -374,8 +397,7 @@ keepalive_stop_timeout (SoupWebsocketConnection *self)
 
 	if (priv->keepalive_timeout) {
 		g_source_destroy (priv->keepalive_timeout);
-		g_source_unref (priv->keepalive_timeout);
-		priv->keepalive_timeout = NULL;
+		g_clear_pointer (&priv->keepalive_timeout, g_source_unref);
 	}
 }
 
@@ -394,8 +416,7 @@ close_io_stop_timeout (SoupWebsocketConnection *self)
 
 	if (priv->close_timeout) {
 		g_source_destroy (priv->close_timeout);
-		g_source_unref (priv->close_timeout);
-		priv->close_timeout = NULL;
+		g_clear_pointer (&priv->close_timeout, g_source_unref);
 	}
 }
 
@@ -510,6 +531,11 @@ send_message (SoupWebsocketConnection *self,
 		return;
 	}
 
+	if (length > MAX_OUTGOING_PAYLOAD_SIZE) {
+		too_big_outgoing_payload_error_and_close (self, length);
+		return;
+	}
+
 	bytes = g_byte_array_sized_new (14 + length);
 	outer = bytes->data;
 	outer[0] = 0x80 | opcode;
@@ -529,6 +555,14 @@ send_message (SoupWebsocketConnection *self,
 
 	data = g_bytes_get_data (filtered_bytes, &length);
 	buffered_amount = length;
+
+	/* Extensions may have grown the payload */
+	if (length > MAX_OUTGOING_PAYLOAD_SIZE) {
+		g_byte_array_free (bytes, TRUE);
+		g_bytes_unref (filtered_bytes);
+		too_big_outgoing_payload_error_and_close (self, length);
+		return;
+	}
 
 	/* If control message, check payload size */
 	if (opcode & 0x08) {
@@ -716,6 +750,20 @@ too_big_incoming_payload_error_and_close (SoupWebsocketConnection *self,
 }
 
 static void
+too_big_outgoing_payload_error_and_close (SoupWebsocketConnection *self,
+                                          gsize len)
+{
+	GError *error;
+
+	error = g_error_new_literal (SOUP_WEBSOCKET_ERROR,
+				     SOUP_WEBSOCKET_CLOSE_TOO_BIG,
+				     _("WebSocket message is too large to send"));
+	g_debug ("attempted to send a frame of size %" G_GSIZE_FORMAT ", but max supported size is %" G_GSIZE_FORMAT,
+	         len, MAX_OUTGOING_PAYLOAD_SIZE);
+	emit_error_and_close (self, error, FALSE);
+}
+
+static void
 too_big_message_error_and_close (SoupWebsocketConnection *self,
                                  guint64 len)
 {
@@ -800,8 +848,7 @@ receive_close (SoupWebsocketConnection *self,
 	SoupWebsocketConnectionPrivate *priv = soup_websocket_connection_get_instance_private (self);
 
 	priv->peer_close_code = 0;
-	g_free (priv->peer_close_data);
-	priv->peer_close_data = NULL;
+	g_clear_pointer (&priv->peer_close_data, g_free);
 	priv->close_received = TRUE;
 
 	switch (len) {
@@ -855,6 +902,24 @@ receive_close (SoupWebsocketConnection *self,
 	}
 }
 
+static guint
+count_pending_pongs (SoupWebsocketConnectionPrivate *priv)
+{
+        guint n = 0;
+        GList *l;
+
+        for (l = g_queue_peek_head_link (&priv->outgoing); l != NULL; l = l->next) {
+                Frame *frame = l->data;
+                const guint8 *bytes = g_bytes_get_data (frame->data, NULL);
+
+                /* The opcode is the low nibble of the first header byte */
+                if ((bytes[0] & 0x0f) == 0x0A)
+                        n++;
+        }
+
+        return n;
+}
+
 static void
 receive_ping (SoupWebsocketConnection *self,
                       const guint8 *data,
@@ -863,6 +928,11 @@ receive_ping (SoupWebsocketConnection *self,
         SoupWebsocketConnectionPrivate *priv = soup_websocket_connection_get_instance_private (self);
 
         if (!priv->suppress_pongs_for_tests) {
+                if (count_pending_pongs (priv) >= MAX_PENDING_PONGS) {
+                        g_debug ("received ping, but too many pongs are already queued; dropping");
+                        return;
+                }
+
                 /* Send back a pong with same data */
                 g_debug ("received ping, responding");
                 send_message (self, SOUP_WEBSOCKET_QUEUE_URGENT, 0x0A, data, len);
@@ -876,6 +946,7 @@ receive_pong (SoupWebsocketConnection *self,
 {
         SoupWebsocketConnectionPrivate *priv = soup_websocket_connection_get_instance_private (self);
 	GByteArray *bytes;
+	GBytes *payload;
 
 	bytes = g_byte_array_sized_new (len + 1);
 	g_byte_array_append (bytes, data, len);
@@ -896,9 +967,9 @@ receive_pong (SoupWebsocketConnection *self,
                 g_debug ("received pong message");
         }
 
-	g_signal_emit (self, signals[PONG], 0, bytes);
-	g_byte_array_unref (bytes);
-
+	payload = g_byte_array_free_to_bytes (bytes);
+	g_signal_emit (self, signals[PONG], 0, payload);
+	g_bytes_unref (payload);
 }
 
 static void
@@ -985,6 +1056,21 @@ process_contents (SoupWebsocketConnection *self,
 			g_debug ("received frame %d with %d payload", (int)opcode, (int)payload_len);
 		}
 
+		/* Regardless of max-total-message-size, the reassembled message
+		 * must fit in a GByteArray. Check before allocating, since
+		 * g_byte_array_sized_new() takes a guint too.
+		 */
+		if (payload_len > MAX_MESSAGE_SIZE - (priv->message_data ? priv->message_data->len : 0)) {
+			guint64 message_size = priv->message_data ? priv->message_data->len : 0;
+
+			if (payload_len > G_MAXUINT64 - message_size)
+				message_size = G_MAXUINT64;
+			else
+				message_size += payload_len;
+			too_big_message_error_and_close (self, message_size);
+			return;
+		}
+
 		if (opcode) {
 			priv->message_opcode = opcode;
 			priv->message_data = g_byte_array_sized_new (payload_len + 1);
@@ -995,8 +1081,15 @@ process_contents (SoupWebsocketConnection *self,
 		case 0x02:
 			/* Safety valve */
 			if (priv->max_total_message_size > 0 &&
-			    (priv->message_data->len + payload_len) > priv->max_total_message_size) {
-				too_big_message_error_and_close (self, (priv->message_data->len + payload_len));
+			    (priv->message_data->len > priv->max_total_message_size ||
+			     payload_len > priv->max_total_message_size - priv->message_data->len)) {
+				guint64 message_size = priv->message_data->len;
+
+				if (payload_len > G_MAXUINT64 - message_size)
+					message_size = G_MAXUINT64;
+				else
+					message_size += payload_len;
+				too_big_message_error_and_close (self, message_size);
 				return;
 			}
 			g_byte_array_append (priv->message_data, payload, payload_len);
@@ -1016,8 +1109,7 @@ process_contents (SoupWebsocketConnection *self,
 				g_debug ("received invalid non-UTF8 text data");
 
 				/* Discard the entire message */
-				g_byte_array_unref (priv->message_data);
-				priv->message_data = NULL;
+				g_clear_pointer (&priv->message_data, g_byte_array_unref);
 				priv->message_opcode = 0;
 
 				bad_data_error_and_close (self);
@@ -1042,6 +1134,21 @@ process_contents (SoupWebsocketConnection *self,
 	}
 }
 
+static guint64
+get_remaining_message_size (SoupWebsocketConnectionPrivate *priv)
+{
+	if (priv->max_total_message_size == 0)
+		return G_MAXUINT64;
+
+	if (!priv->message_data)
+		return priv->max_total_message_size;
+
+	if (priv->message_data->len >= priv->max_total_message_size)
+		return 0;
+
+	return priv->max_total_message_size - priv->message_data->len;
+}
+
 static gboolean
 process_frame (SoupWebsocketConnection *self)
 {
@@ -1057,6 +1164,7 @@ process_frame (SoupWebsocketConnection *self)
 	gsize len;
 	gsize at;
 	GBytes *filtered_bytes;
+	guint64 max_output_size;
 	GList *l;
 	GError *error = NULL;
 
@@ -1087,6 +1195,13 @@ process_frame (SoupWebsocketConnection *self)
 		protocol_error_and_close (self);
                 return FALSE;
         }
+
+	/* RFC 6455 section 5.5 limits control frame payloads to 125 bytes. */
+	if (control && (header[1] & 0x7f) > 125) {
+		g_debug ("received oversized control frame");
+		protocol_error_and_close (self);
+		return FALSE;
+	}
 
 	switch (header[1] & 0x7f) {
 	case 126:
@@ -1134,9 +1249,14 @@ process_frame (SoupWebsocketConnection *self)
 		break;
 	}
 
-	/* Safety valve */
-	if (priv->max_incoming_payload_size > 0 &&
-	    payload_len > priv->max_incoming_payload_size) {
+	/* Safety valve. Even with no configured limit, the frame can never
+	 * exceed what the incoming buffer can hold. Checking this before any
+	 * arithmetic on payload_len also guarantees at + payload_len cannot
+	 * overflow below.
+	 */
+	if (payload_len > MAX_INCOMING_PAYLOAD_SIZE ||
+	    (priv->max_incoming_payload_size > 0 &&
+	     payload_len > priv->max_incoming_payload_size)) {
 		too_big_incoming_payload_error_and_close (self, payload_len);
 		return FALSE;
 	}
@@ -1151,12 +1271,6 @@ process_frame (SoupWebsocketConnection *self)
 		payload += 4;
 		at += 4;
 
-		/* at has a maximum value of 10 + 4 = 14 */
-		if (payload_len > G_MAXSIZE - 14) {
-			bad_data_error_and_close (self);
-			return FALSE;
-		}
-
 		if (len < at + payload_len)
 			return FALSE; /* need more data */
 
@@ -1164,11 +1278,16 @@ process_frame (SoupWebsocketConnection *self)
 	}
 
 	filtered_bytes = g_bytes_new_static (payload, payload_len);
+	max_output_size = get_remaining_message_size (priv);
 	for (l = priv->extensions; l != NULL; l = g_list_next (l)) {
 		SoupWebsocketExtension *extension;
 
 		extension = (SoupWebsocketExtension *)l->data;
-		filtered_bytes = soup_websocket_extension_process_incoming_message (extension, priv->incoming->data, filtered_bytes, &error);
+		filtered_bytes = soup_websocket_extension_process_incoming_message_with_limit (extension,
+											       priv->incoming->data,
+											       filtered_bytes,
+											       max_output_size,
+											       &error);
 		if (error) {
 			emit_error_and_close (self, error, FALSE);
 			return FALSE;
@@ -1518,6 +1637,9 @@ soup_websocket_connection_set_property (GObject *object,
 
 	case PROP_MAX_TOTAL_MESSAGE_SIZE:
 		priv->max_total_message_size = g_value_get_uint64 (value);
+		break;
+	case PROP_STATE:
+		g_assert_not_reached ();
 		break;
 
 	default:
@@ -2500,4 +2622,12 @@ soup_websocket_connection_set_suppress_pongs_for_tests (SoupWebsocketConnection 
         SoupWebsocketConnectionPrivate *priv = soup_websocket_connection_get_instance_private (self);
 
         priv->suppress_pongs_for_tests = suppress;
+}
+
+guint
+soup_websocket_connection_get_pending_pong_count_for_tests (SoupWebsocketConnection *self)
+{
+        SoupWebsocketConnectionPrivate *priv = soup_websocket_connection_get_instance_private (self);
+
+        return count_pending_pongs (priv);
 }

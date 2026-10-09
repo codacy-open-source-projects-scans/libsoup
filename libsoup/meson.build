@@ -17,9 +17,12 @@ soup_sources = [
   'cache/soup-cache-client-input-stream.c',
   'cache/soup-cache-input-stream.c',
 
+  'content-decoder/soup-compression-dictionary-decoder.c',
+  'content-decoder/soup-compression-dictionary-request.c',
   'content-decoder/soup-content-decoder.c',
   'content-decoder/soup-content-processor.c',
   'content-decoder/soup-converter-wrapper.c',
+  'content-decoder/soup-dictionary-header-private.c',
 
   'content-sniffer/soup-content-sniffer.c',
   'content-sniffer/soup-content-sniffer-stream.c',
@@ -102,6 +105,7 @@ soup_introspection_headers = [
 
   'cache/soup-cache.h',
 
+  'content-decoder/soup-compression-dictionary-request.h',
   'content-decoder/soup-content-decoder.h',
 
   'content-sniffer/soup-content-sniffer.h',
@@ -152,6 +156,10 @@ if brotlidec_dep.found()
   soup_sources += 'content-decoder/soup-brotli-decompressor.c'
 endif
 
+if libzstd_dep.found()
+  soup_sources += 'content-decoder/soup-zstd-decompressor.c'
+endif
+
 
 install_headers(soup_installed_headers, subdir : includedir)
 
@@ -188,6 +196,7 @@ deps = [
   sqlite_dep,
   libpsl_dep,
   brotlidec_dep,
+  libzstd_dep,
   platform_deps,
   gssapi_dep,
   libz_dep,

@@ -103,6 +103,35 @@ server_callback (SoupServer        *server,
 	}
 }
 
+static void
+do_method_injection_test (void)
+{
+        SoupMessage *msg;
+        char *uri_string;
+
+        g_test_expect_message ("libsoup", G_LOG_LEVEL_CRITICAL,
+                               "*assertion*method_is_valid*failed*");
+        msg = soup_message_new_from_uri ("GET / HTTP/1.1\r\nX-Injected: evil", base_uri);
+        g_assert_null (msg);
+        g_test_assert_expected_messages ();
+
+        uri_string = g_uri_to_string (base_uri);
+        g_test_expect_message ("libsoup", G_LOG_LEVEL_CRITICAL,
+                               "*assertion*method_is_valid*failed*");
+        msg = soup_message_new ("GET / HTTP/1.1\r\nX-Injected: evil", uri_string);
+        g_assert_null (msg);
+        g_test_assert_expected_messages ();
+        g_free (uri_string);
+
+        g_test_expect_message ("libsoup", G_LOG_LEVEL_CRITICAL,
+                               "*assertion*method_is_valid*failed*");
+        msg = soup_message_new_from_uri (SOUP_METHOD_GET, base_uri);
+        soup_message_set_method (msg, "POST /evil HTTP/1.1\r\nHost: attacker\r\n\r\nGET");
+        g_assert_cmpstr (soup_message_get_method (msg), ==, SOUP_METHOD_GET);
+        g_test_assert_expected_messages ();
+        g_object_unref (msg);
+}
+
 /* Host header handling: client must be able to override the default
  * value, server must be able to recognize different Host values.
  */
@@ -188,7 +217,7 @@ static gboolean
 cu_idle_quit (gpointer loop)
 {
 	g_main_loop_quit (loop);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static void
@@ -414,7 +443,7 @@ static gboolean
 ea_abort_session (gpointer session)
 {
 	soup_session_abort (session);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static void
@@ -545,7 +574,7 @@ static gboolean
 cancel_message_timeout (GCancellable *cancellable)
 {
 	g_cancellable_cancel (cancellable);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static void
@@ -1181,6 +1210,7 @@ main (int argc, char **argv)
 
 	g_test_add_func ("/misc/bigheader", do_host_big_header);
 	g_test_add_func ("/misc/host", do_host_test);
+	g_test_add_func ("/misc/method-injection", do_method_injection_test);
 	g_test_add_func ("/misc/callback-unref/msg", do_callback_unref_test);
 	g_test_add_func ("/misc/msg-reuse", do_msg_reuse_test);
 	g_test_add_func ("/misc/early-abort/msg", do_early_abort_test);

@@ -46,6 +46,9 @@ soup_headers_parse (const char *str, int len, SoupMessageHeaders *dest)
 	g_return_val_if_fail (str != NULL, FALSE);
 	g_return_val_if_fail (dest != NULL, FALSE);
 
+        if (len <= 0 || len > MAX_HEADERS_BUFFER_SIZE)
+                return FALSE;
+
 	/* As per RFC 2616 section 19.3, we treat '\n' as the
 	 * line terminator, and '\r', if it appears, merely as
 	 * ignorable trailing whitespace.
@@ -794,8 +797,7 @@ parse_param_list (const char *header, char delim, gboolean strict)
 		duplicated = g_hash_table_lookup_extended (params, item, NULL, NULL);
 
 		if (strict && duplicated) {
-			soup_header_free_param_list (params);
-			params = NULL;
+			g_clear_pointer (&params, soup_header_free_param_list);
 			g_slist_foreach (iter, (GFunc)g_free, NULL);
 			if (parsed_value)
 				g_string_free (parsed_value, TRUE);

@@ -125,6 +125,9 @@ soup_body_input_stream_get_property (GObject *object, guint prop_id,
 	case PROP_ENCODING:
 		g_value_set_enum (value, priv->encoding);
 		break;
+	case PROP_CONTENT_LENGTH:
+		g_assert_not_reached ();
+		break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 		break;
@@ -197,12 +200,27 @@ again:
 			return -1;
 		}
 
+                /* metabuf is not NUL-terminated by read_until(), so terminate
+                 * it at the trailing CRLF before scanning for chunk extensions. */
+                metabuf[nread - 2] = '\0';
+
                 /* ignore extensions */
-                boundary = strstr (metabuf, ";");
+                boundary = memchr (metabuf, ';', nread);
                 if (boundary)
                         *boundary = '\0';
-                else
-                        metabuf[nread - 2] = '\0';
+
+                /* RFC 9112 defines chunk-size as 1*HEXDIG. g_ascii_strtoull()
+                 * also skips leading whitespace and accepts a sign, which would
+                 * create a request-smuggling differential with strict
+                 * intermediaries, so require a leading hex digit. */
+                if (!g_ascii_isxdigit (metabuf[0])) {
+                        if (error && *error == NULL) {
+                                g_set_error_literal (error, G_IO_ERROR,
+                                                     G_IO_ERROR_INVALID_ARGUMENT,
+                                                     _("Invalid chunk size"));
+                        }
+                        return -1;
+                }
 
                 chunk_size = g_ascii_strtoull (metabuf, &end, 16);
                 if (*end) {

@@ -408,8 +408,7 @@ socket_props_changed (SoupSession *session)
 	if (!priv->socket_props)
 		return;
 
-	soup_socket_properties_unref (priv->socket_props);
-	priv->socket_props = NULL;
+	g_clear_pointer (&priv->socket_props, soup_socket_properties_unref);
 	soup_session_ensure_socket_props (session);
 }
 
@@ -881,8 +880,7 @@ soup_session_set_user_agent (SoupSession *session,
 		return;
 
 	if (user_agent == NULL) {
-		g_free (priv->user_agent);
-		priv->user_agent = NULL;
+		g_clear_pointer (&priv->user_agent, g_free);
 	} else if (!*user_agent) {
 		if (g_strcmp0 (priv->user_agent, SOUP_SESSION_USER_AGENT_BASE) == 0)
 			return;
@@ -1237,6 +1235,14 @@ soup_session_redirect_message (SoupSession *session,
                 soup_message_headers_remove_common (soup_message_get_request_headers (msg), SOUP_HEADER_PROXY_AUTHORIZATION);
                 soup_message_set_auth (msg, NULL);
         }
+
+        /* The compression dictionary was chosen for the previous request URL and must not be
+         * carried over to the redirect target (it is origin-sensitive). Drop the hash, the id and
+         * both headers; the caller may set a new dictionary for the new URL. */
+        soup_message_set_compression_dictionary_hash (msg, NULL);
+        soup_message_set_compression_dictionary_id (msg, NULL);
+        soup_message_headers_remove (soup_message_get_request_headers (msg), "Available-Dictionary");
+        soup_message_headers_remove (soup_message_get_request_headers (msg), "Dictionary-ID");
 
         soup_message_set_request_host_from_uri (msg, new_uri);
 	soup_message_set_uri (msg, new_uri);
@@ -1815,6 +1821,21 @@ soup_session_process_queue_item (SoupSession          *session,
 		if (item->paused)
 			return;
 
+		/* The cancellable may have been cancelled from a handler run while
+		 * the item was being queued, such as SoupHSTSEnforcer::hsts-enforced.
+		 * Nothing between request-queued and the write checks it, so check
+		 * here while the message can still be stopped.
+		 */
+		if ((item->state == SOUP_MESSAGE_STARTING ||
+		     item->state == SOUP_MESSAGE_CONNECTED ||
+		     item->state == SOUP_MESSAGE_READY) &&
+		    g_cancellable_is_cancelled (item->cancellable)) {
+			session_debug (item, "Cancelled before sending");
+			if (!item->error)
+				g_cancellable_set_error_if_cancelled (item->cancellable, &item->error);
+			item->state = SOUP_MESSAGE_FINISHING;
+		}
+
 		switch (item->state) {
 		case SOUP_MESSAGE_STARTING:
 			if (!soup_session_ensure_item_connection (session, item))
@@ -1849,7 +1870,13 @@ soup_session_process_queue_item (SoupSession          *session,
 			soup_session_send_queue_item (session, item,
 						      (SoupMessageIOCompletionFn)message_completed);
 
-			if (item->async)
+                        /* soup_session_send_queue_item may invoke the completion
+                         * callback synchronously (e.g. when io_data is NULL after
+                         * a broken HTTP/2 session), which changes item->state away
+                         * from RUNNING before we return.  Only enter the async read
+                         * loop when the item is still actually running.
+                         */
+			if (item->async && item->state == SOUP_MESSAGE_RUNNING)
 				async_send_request_running (session, item);
 			return;
 
@@ -2733,8 +2760,7 @@ async_send_request_return_result (SoupMessageQueueItem *item,
 	g_signal_handlers_disconnect_matched (item->msg, G_SIGNAL_MATCH_DATA,
 					      0, 0, NULL, NULL, item);
 
-	task = item->task;
-	item->task = NULL;
+	task = g_steal_pointer (&item->task);
 
         /* This cancellable was set for the send operation that is done now */
         g_object_unref (item->cancellable);
@@ -3316,8 +3342,7 @@ soup_session_send (SoupSession   *session,
 			stream = NULL;
 			break;
 		}
-		g_object_unref (stream);
-		stream = NULL;
+		g_clear_object (&stream);
 
 		/* If the message was requeued, loop */
 		if (item->state == SOUP_MESSAGE_RESTARTING) {

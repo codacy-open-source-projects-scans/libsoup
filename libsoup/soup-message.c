@@ -17,6 +17,8 @@
 #include "soup-message-private.h"
 #include "soup-message-headers-private.h"
 #include "soup-message-metrics-private.h"
+#include "soup-message-queue-item.h"
+#include "soup-session-private.h"
 #include "soup-uri-utils-private.h"
 #include "content-sniffer/soup-content-sniffer-stream.h"
 
@@ -52,8 +54,6 @@ struct _SoupMessage {
 };
 
 typedef struct {
-	SoupClientMessageIO *io_data;
-
         SoupMessageHeaders *request_headers;
 	SoupMessageHeaders *response_headers;
 
@@ -100,6 +100,10 @@ typedef struct {
         GSocketAddress *remote_address;
 
         SoupMessageMetrics *metrics;
+
+        GBytes *compression_dictionary_hash;
+        char *compression_dictionary_id;
+        SoupCompressionDictionaryRequest *compression_dictionary_request;
 } SoupMessagePrivate;
 
 G_DEFINE_FINAL_TYPE_WITH_PRIVATE (SoupMessage, soup_message, G_TYPE_OBJECT)
@@ -125,6 +129,7 @@ enum {
         REQUEST_CERTIFICATE,
         REQUEST_CERTIFICATE_PASSWORD,
 	HSTS_ENFORCED,
+        REQUEST_COMPRESSION_DICTIONARY,
 
 	LAST_SIGNAL
 };
@@ -209,6 +214,10 @@ soup_message_finalize (GObject *object)
         g_clear_object (&priv->remote_address);
         g_clear_object (&priv->tls_client_certificate);
 
+        g_clear_pointer (&priv->compression_dictionary_hash, g_bytes_unref);
+        g_clear_pointer (&priv->compression_dictionary_id, g_free);
+        g_clear_object (&priv->compression_dictionary_request);
+
 	soup_message_headers_unref (priv->request_headers);
 	soup_message_headers_unref (priv->response_headers);
 	g_clear_object (&priv->request_body_stream);
@@ -249,6 +258,18 @@ soup_message_set_property (GObject *object, guint prop_id,
 	case PROP_IS_OPTIONS_PING:
                 soup_message_set_is_options_ping (msg, g_value_get_boolean (value));
 		break;
+	case PROP_HTTP_VERSION:
+	case PROP_STATUS_CODE:
+	case PROP_REASON_PHRASE:
+	case PROP_REQUEST_HEADERS:
+	case PROP_RESPONSE_HEADERS:
+	case PROP_TLS_PEER_CERTIFICATE:
+	case PROP_TLS_PEER_CERTIFICATE_ERRORS:
+	case PROP_TLS_PROTOCOL_VERSION:
+	case PROP_TLS_CIPHERSUITE_NAME:
+	case PROP_REMOTE_ADDRESS:
+                g_assert_not_reached ();
+                break;
 	default:
 		G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
 		break;
@@ -719,6 +740,37 @@ soup_message_class_init (SoupMessageClass *message_class)
 			      NULL,
 			      G_TYPE_NONE, 0);
 
+        /**
+         * SoupMessage::request-compression-dictionary:
+         * @msg: the message
+         * @request: a #SoupCompressionDictionaryRequest to resolve
+         *
+         * Emitted when the server responds with `Content-Encoding: dcb` or
+         * `Content-Encoding: dcz` and libsoup needs the raw dictionary bytes
+         * to set up decompression.
+         *
+         * Call [method@CompressionDictionaryRequest.set_dictionary] on @request
+         * to provide the dictionary, or [method@CompressionDictionaryRequest.cancel]
+         * to abort. Either can be done synchronously inside this handler, or
+         * asynchronously after calling [method@GObject.Object.ref] on @request
+         * and returning %TRUE.
+         *
+         * Returns: %TRUE to indicate the request will be handled (sync or async),
+         *   or %FALSE to let other handlers run. If no handler returns %TRUE the
+         *   response fails.
+         *
+         * Since: 3.8
+         */
+        signals[REQUEST_COMPRESSION_DICTIONARY] =
+                g_signal_new ("request-compression-dictionary",
+                              G_OBJECT_CLASS_TYPE (object_class),
+                              G_SIGNAL_RUN_LAST,
+                              0,
+                              g_signal_accumulator_true_handled, NULL,
+                              NULL,
+                              G_TYPE_BOOLEAN, 1,
+                              SOUP_TYPE_COMPRESSION_DICTIONARY_REQUEST);
+
 	/**
 	 * SoupMessage:method: (attributes org.gtk.Property.get=soup_message_get_method org.gtk.Property.set=soup_message_set_method)
 	 *
@@ -817,7 +869,7 @@ soup_message_class_init (SoupMessageClass *message_class)
 				    "Site for cookies",
 				    "The URI for the site to compare cookies against",
 				    G_TYPE_URI,
-				    G_PARAM_READWRITE);
+				    G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 	/**
 	 * SoupMessage:is-top-level-navigation: (attributes org.gtk.Property.get=soup_message_get_is_top_level_navigation org.gtk.Property.set=soup_message_set_is_top_level_navigation)
 	 *
@@ -828,7 +880,7 @@ soup_message_class_init (SoupMessageClass *message_class)
 				     "Is top-level navigation",
 				     "If the current messsage is navigating between top-levels",
 				     FALSE,
-				     G_PARAM_READWRITE);
+				     G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS);
 	/**
 	 * SoupMessage:request-headers: (attributes org.gtk.Property.get=soup_message_get_request_headers)
 	 *
@@ -954,6 +1006,8 @@ soup_message_class_init (SoupMessageClass *message_class)
 }
 
 
+static gboolean method_is_valid (const char *method);
+
 /**
  * soup_message_new:
  * @method: the HTTP method for the created request
@@ -970,7 +1024,7 @@ soup_message_new (const char *method, const char *uri_string)
 	SoupMessage *msg;
 	GUri *uri;
 
-	g_return_val_if_fail (method != NULL, NULL);
+	g_return_val_if_fail (method_is_valid (method), NULL);
 	g_return_val_if_fail (uri_string != NULL, NULL);
 
 	uri = g_uri_parse (uri_string, SOUP_HTTP_URI_FLAGS, NULL);
@@ -999,7 +1053,7 @@ soup_message_new (const char *method, const char *uri_string)
 SoupMessage *
 soup_message_new_from_uri (const char *method, GUri *uri)
 {
-        g_return_val_if_fail (method != NULL, NULL);
+        g_return_val_if_fail (method_is_valid (method), NULL);
         g_return_val_if_fail (soup_uri_is_valid (uri), NULL);
 
 	return g_object_new (SOUP_TYPE_MESSAGE,
@@ -1718,7 +1772,6 @@ soup_message_set_connection (SoupMessage    *msg,
 
 	if (connection) {
 		g_signal_handlers_disconnect_by_data (connection, msg);
-                priv->io_data = NULL;
 
                 if (priv->pending_tls_cert_request) {
                         soup_connection_complete_tls_certificate_request (connection,
@@ -2719,17 +2772,28 @@ soup_message_get_priority (SoupMessage *msg)
 SoupClientMessageIO *
 soup_message_get_io_data (SoupMessage *msg)
 {
-	SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupConnection *connection = g_weak_ref_get (&priv->connection);
+        SoupClientMessageIO *io_data;
 
-	return priv->io_data;
+        if (connection == NULL)
+                return NULL;
+
+        io_data = soup_connection_get_io_data (connection);
+        g_object_unref (connection);
+
+	return io_data;
 }
 
 void
 soup_message_io_finished (SoupMessage *msg)
 {
+#ifndef G_DISABLE_ASSERT
         SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+#endif
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        if (!priv->io_data)
+        if (!io_data)
                 return;
 
 #ifndef G_DISABLE_ASSERT
@@ -2738,35 +2802,35 @@ soup_message_io_finished (SoupMessage *msg)
         g_assert (connection != NULL);
         g_object_unref (connection);
 #endif
-        soup_client_message_io_finished (g_steal_pointer (&priv->io_data), msg);
+        soup_client_message_io_finished (io_data, msg);
 }
 
 void
 soup_message_io_pause (SoupMessage *msg)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        g_return_if_fail (priv->io_data != NULL);
+        g_assert (io_data != NULL);
 
-        soup_client_message_io_pause (priv->io_data, msg);
+        soup_client_message_io_pause (io_data, msg);
 }
 
 void
 soup_message_io_unpause (SoupMessage *msg)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        g_return_if_fail (priv->io_data != NULL);
+        g_assert (io_data != NULL);
 
-        soup_client_message_io_unpause (priv->io_data, msg);
+        soup_client_message_io_unpause (io_data, msg);
 }
 
 gboolean
 soup_message_is_io_paused (SoupMessage *msg)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        return priv->io_data && soup_client_message_io_is_paused (priv->io_data, msg);
+        return io_data && soup_client_message_io_is_paused (io_data, msg);
 }
 
 /**
@@ -2780,18 +2844,20 @@ soup_message_is_io_paused (SoupMessage *msg)
 gboolean
 soup_message_io_in_progress (SoupMessage *msg)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        return priv->io_data && soup_client_message_io_in_progress (priv->io_data, msg);
+        return io_data && soup_client_message_io_in_progress (io_data, msg);
 }
 
 void
 soup_message_io_run (SoupMessage *msg,
                      gboolean     blocking)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        soup_client_message_io_run (priv->io_data, msg, blocking);
+        g_assert (io_data != NULL);
+
+        soup_client_message_io_run (io_data, msg, blocking);
 }
 
 gboolean
@@ -2799,9 +2865,11 @@ soup_message_io_run_until_read (SoupMessage  *msg,
                                 GCancellable *cancellable,
                                 GError      **error)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        return soup_client_message_io_run_until_read (priv->io_data, msg, cancellable, error);
+        g_assert (io_data != NULL);
+
+        return soup_client_message_io_run_until_read (io_data, msg, cancellable, error);
 }
 
 void
@@ -2811,9 +2879,11 @@ soup_message_io_run_until_read_async (SoupMessage        *msg,
                                       GAsyncReadyCallback callback,
                                       gpointer            user_data)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        soup_client_message_io_run_until_read_async (priv->io_data, msg, io_priority, cancellable, callback, user_data);
+        g_assert (io_data != NULL);
+
+        soup_client_message_io_run_until_read_async (io_data, msg, io_priority, cancellable, callback, user_data);
 }
 
 gboolean
@@ -2830,22 +2900,23 @@ soup_message_io_skip (SoupMessage  *msg,
                       GCancellable *cancellable,
                       GError      **error)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
-        if (!priv->io_data)
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
+
+        if (!io_data)
                 return TRUE;
 
-        return soup_client_message_io_skip (priv->io_data, msg, blocking, cancellable, error);
+        return soup_client_message_io_skip (io_data, msg, blocking, cancellable, error);
 }
 
 GCancellable *
 soup_message_io_get_cancellable (SoupMessage *msg)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        if (!priv->io_data)
+        if (!io_data)
                 return NULL;
 
-        return soup_client_message_io_get_cancellable (priv->io_data, msg);
+        return soup_client_message_io_get_cancellable (io_data, msg);
 }
 
 void
@@ -2856,19 +2927,40 @@ soup_message_send_item (SoupMessage              *msg,
 {
         SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
         SoupConnection *connection = g_weak_ref_get (&priv->connection);
+        SoupClientMessageIO *io_data;
 
-        priv->io_data = soup_connection_setup_message_io (connection, msg);
+        io_data = soup_connection_setup_message_io (connection, msg);
+        if (!io_data) {
+                /* The shared connection (typically an HTTP/2 session) became
+                 * unusable before this message could be sent: it failed during
+                 * or right after its handshake while this item was coalesced
+                 * onto it via the CONNECTING fast-path in soup-connection-manager.
+                 * The request was never actually written, so drop the broken
+                 * connection and requeue it onto a fresh one. Going through
+                 * soup_session_requeue_message() honours SOUP_SESSION_MAX_RESEND_COUNT,
+                 * so a persistently broken peer fails the message with
+                 * SOUP_SESSION_ERROR_TOO_MANY_RESTARTS instead of looping forever.
+                 */
+                soup_connection_disconnect (connection);
+                g_object_unref (connection);
+                soup_message_set_connection (msg, NULL);
+                soup_session_requeue_message (item->session, msg);
+                completion_cb (G_OBJECT (msg), SOUP_MESSAGE_IO_INTERRUPTED, user_data);
+                return;
+        }
         g_object_unref (connection);
-        soup_client_message_io_send_item (priv->io_data, item, completion_cb, user_data);
+        soup_client_message_io_send_item (io_data, item, completion_cb, user_data);
 }
 
 GInputStream *
 soup_message_io_get_response_istream (SoupMessage  *msg,
                                       GError      **error)
 {
-        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+        SoupClientMessageIO *io_data = soup_message_get_io_data (msg);
 
-        return soup_client_message_io_get_response_stream (priv->io_data, msg, error);
+        g_assert (io_data != NULL);
+
+        return soup_client_message_io_get_response_stream (io_data, msg, error);
 }
 
 void
@@ -3033,6 +3125,28 @@ soup_message_set_reason_phrase (SoupMessage *msg, const char *reason_phrase)
         g_object_notify_by_pspec (G_OBJECT (msg), properties[PROP_REASON_PHRASE]);
 }
 
+/* Validates that a method string conforms to the RFC 9110 'token' specification. */
+static gboolean
+method_is_valid (const char *method)
+{
+        const char *p;
+
+        if (method == NULL || *method == '\0')
+                return FALSE;
+
+        for (p = method; *p != '\0'; p++) {
+                char c = *p;
+
+                if (g_ascii_isalnum (c))
+                        continue;
+
+	        if (strchr ("!#$%&\'*+-.^_`|~", c) == NULL)
+		        return FALSE;
+        }
+
+        return TRUE;
+}
+
 /**
  * soup_message_set_method: (attributes org.gtk.Method.set_property=method)
  * @msg: a #SoupMessage
@@ -3045,8 +3159,11 @@ soup_message_set_method (SoupMessage *msg,
                          const char  *method)
 {
         SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
-        const char *new_method = g_intern_string (method);
+        const char *new_method;
 
+        g_return_if_fail (method_is_valid (method));
+
+        new_method = g_intern_string (method);
         if (priv->method == new_method)
                 return;
 
@@ -3357,4 +3474,143 @@ soup_message_get_force_http1 (SoupMessage *msg)
 	g_return_val_if_fail (SOUP_IS_MESSAGE (msg), FALSE);
 
 	return soup_message_get_force_http_version (msg) == SOUP_HTTP_1_1;
+}
+
+/**
+ * soup_message_set_compression_dictionary_hash:
+ * @msg: a #SoupMessage
+ * @hash: (nullable): a #GBytes containing the raw SHA-256 hash (32 bytes) of the
+ *   shared dictionary, or %NULL to unset
+ *
+ * Sets the SHA-256 hash of the shared dictionary to advertise for Compression
+ * Dictionary Transport (RFC 9842).
+ *
+ * When set, [class@ContentDecoder] will include `dcb` and/or `dcz` in the
+ * `Accept-Encoding` request header (over HTTPS) and will send an
+ * `Available-Dictionary` header containing the base64-encoded @hash.
+ * When the server responds with `Content-Encoding: dcb` or `dcz`, the
+ * [signal@Message::request-compression-dictionary] signal is emitted so the
+ * caller can supply the actual dictionary bytes.
+ *
+ * If the dictionary was registered with an identifier, set it with
+ * [method@Message.set_compression_dictionary_id] so that a `Dictionary-ID`
+ * header accompanies `Available-Dictionary`.
+ *
+ * The hash does not survive redirects: a dictionary is chosen for a specific
+ * request URL, so when @msg is redirected the hash, the id and both headers are
+ * cleared. It is the caller's responsibility to select and set a new dictionary
+ * appropriate for the redirect target, if any.
+ *
+ * Since: 3.8
+ */
+void
+soup_message_set_compression_dictionary_hash (SoupMessage *msg,
+                                              GBytes      *hash)
+{
+        SoupMessagePrivate *priv;
+
+        g_return_if_fail (SOUP_IS_MESSAGE (msg));
+
+        priv = soup_message_get_instance_private (msg);
+
+        GBytes *new_hash = hash ? g_bytes_ref (hash) : NULL;
+        g_clear_pointer (&priv->compression_dictionary_hash, g_bytes_unref);
+        priv->compression_dictionary_hash = new_hash;
+}
+
+/**
+ * soup_message_get_compression_dictionary_hash:
+ * @msg: a #SoupMessage
+ *
+ * Gets the SHA-256 hash of the shared dictionary previously set with
+ * [method@Message.set_compression_dictionary_hash].
+ *
+ * Returns: (nullable) (transfer none): the raw 32-byte SHA-256 hash, or %NULL
+ *
+ * Since: 3.8
+ */
+GBytes *
+soup_message_get_compression_dictionary_hash (SoupMessage *msg)
+{
+        SoupMessagePrivate *priv;
+
+        g_return_val_if_fail (SOUP_IS_MESSAGE (msg), NULL);
+
+        priv = soup_message_get_instance_private (msg);
+        return priv->compression_dictionary_hash;
+}
+
+/**
+ * soup_message_set_compression_dictionary_id:
+ * @msg: a #SoupMessage
+ * @id: (nullable): the dictionary identifier, or %NULL to unset
+ *
+ * Sets the identifier of the shared dictionary advertised for Compression
+ * Dictionary Transport (RFC 9842).
+ *
+ * @id is the value the server gave in the `id` parameter of the
+ * `Use-As-Dictionary` response header that registered the dictionary. It is
+ * sent as a `Dictionary-ID` header alongside `Available-Dictionary`, and only
+ * when a hash has been set with
+ * [method@Message.set_compression_dictionary_hash] and that header is sent, so
+ * it can never be emitted on its own.
+
+ * Like the hash, the id does not survive redirects.
+ *
+ * Since: 3.8
+ */
+void
+soup_message_set_compression_dictionary_id (SoupMessage *msg,
+                                            const char  *id)
+{
+        SoupMessagePrivate *priv;
+
+        g_return_if_fail (SOUP_IS_MESSAGE (msg));
+
+        priv = soup_message_get_instance_private (msg);
+
+        if (!g_strcmp0 (priv->compression_dictionary_id, id))
+                return;
+
+        g_free (priv->compression_dictionary_id);
+        priv->compression_dictionary_id = g_strdup (id);
+}
+
+/**
+ * soup_message_get_compression_dictionary_id:
+ * @msg: a #SoupMessage
+ *
+ * Gets the identifier of the shared dictionary previously set with
+ * [method@Message.set_compression_dictionary_id].
+ *
+ * Returns: (nullable) (transfer none): the dictionary identifier, or %NULL
+ *
+ * Since: 3.8
+ */
+const char *
+soup_message_get_compression_dictionary_id (SoupMessage *msg)
+{
+        SoupMessagePrivate *priv;
+
+        g_return_val_if_fail (SOUP_IS_MESSAGE (msg), NULL);
+
+        priv = soup_message_get_instance_private (msg);
+        return priv->compression_dictionary_id;
+}
+
+void
+soup_message_set_compression_dictionary_request (SoupMessage                      *msg,
+                                                 SoupCompressionDictionaryRequest *request)
+{
+        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+
+        g_set_object (&priv->compression_dictionary_request, request);
+}
+
+SoupCompressionDictionaryRequest *
+soup_message_get_compression_dictionary_request (SoupMessage *msg)
+{
+        SoupMessagePrivate *priv = soup_message_get_instance_private (msg);
+
+        return priv->compression_dictionary_request;
 }

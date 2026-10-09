@@ -310,6 +310,7 @@ multipart_next_part_cb (GObject *source, GAsyncResult *res, gpointer data)
 	g_assert_no_error (error);
 	if (error) {
 		g_clear_error (&error);
+		g_input_stream_close (G_FILTER_INPUT_STREAM (multipart)->base_stream, NULL, NULL);
 		g_object_unref (multipart);
 		g_main_loop_quit (loop);
 		return;
@@ -317,6 +318,7 @@ multipart_next_part_cb (GObject *source, GAsyncResult *res, gpointer data)
 
 	if (!in) {
 		g_assert_cmpint (passes, ==, 4);
+		g_input_stream_close (G_FILTER_INPUT_STREAM (multipart)->base_stream, NULL, NULL);
 		g_object_unref (multipart);
 		g_main_loop_quit (loop);
 		return;
@@ -408,8 +410,10 @@ sync_multipart_handling_cb (GObject *source, GAsyncResult *res, gpointer data)
 
 	g_assert_cmpint (passes, ==, 4);
 
-	g_main_loop_quit (loop);
+	g_input_stream_close (G_FILTER_INPUT_STREAM (multipart)->base_stream, NULL, NULL);
 	g_object_unref (multipart);
+
+	g_main_loop_quit (loop);
 }
 
 static void
@@ -433,7 +437,7 @@ test_multipart (gconstpointer data)
 	soup_message_headers_append (soup_message_get_request_headers (msg),
 				     "Connection", "close");
 
-	g_signal_connect (msg, "got_headers",
+	g_signal_connect (msg, "got-headers",
 			  G_CALLBACK (got_headers), &headers_count);
 
 	g_signal_connect (msg, "content-sniffed",
@@ -467,8 +471,7 @@ test_multipart (gconstpointer data)
 	g_assert_cmpint (sniffed_count, ==, sniffed_expected);
 
 	g_object_unref (msg);
-	g_main_loop_unref (loop);
-	loop = NULL;
+	g_clear_pointer (&loop, g_main_loop_unref);
 }
 
 static void
@@ -594,6 +597,135 @@ test_multipart_bounds_bad_3 (void)
 }
 
 static void
+test_multipart_bounds_bad_4 (void)
+{
+        SoupMessage *msg;
+        SoupMessageHeaders *headers;
+        GInputStream *in;
+        GInputStream *next_part;
+        SoupMultipartInputStream *multipart;
+        GError *error = NULL;
+        gchar *boundary;
+        gchar *content_type;
+        gchar *raw_data;
+
+        boundary = g_new (gchar, 20001);
+        memset (boundary, 'a', 20000);
+        boundary[20000] = '\0';
+
+        msg = soup_message_new(SOUP_METHOD_POST, "http://foo/upload");
+        headers = soup_message_get_response_headers (msg);
+        content_type = g_strconcat ("multipart/form-data; boundary=\"", boundary, "\"", NULL);
+        soup_message_headers_replace (headers, "Content-Type", content_type);
+
+        raw_data = g_strconcat ("--", boundary, "\r\nContent-Type: text-plain\r\n\r\nX\r\n", NULL);
+        in = g_memory_input_stream_new_from_data (raw_data, strlen (raw_data), NULL);
+        multipart = soup_multipart_input_stream_new (msg, in);
+        g_object_unref (in);
+        next_part = soup_multipart_input_stream_next_part (multipart, NULL, &error);
+        g_assert_no_error (error);
+        g_assert_null (next_part);
+        g_object_unref (multipart);
+        g_object_unref (msg);
+        g_free (raw_data);
+        g_free (content_type);
+        g_free (boundary);
+}
+
+/* A part body shorter than the boundary. soup_filter_input_stream_read_until()
+ * used to compute buf->len - boundary_length unsigned, wrapping and scanning
+ * far past the buffered data. Only detectable under ASan/valgrind.
+ */
+static void
+test_multipart_short_body (void)
+{
+        SoupMessage *msg;
+        SoupMessageHeaders *headers;
+        GInputStream *in;
+        GInputStream *part;
+        SoupMultipartInputStream *multipart;
+        GError *error = NULL;
+        char boundary[61];
+        char *content_type;
+        char *raw_data;
+        char buffer[4096];
+        gssize nread;
+
+        memset (boundary, 'A', sizeof (boundary) - 1);
+        boundary[sizeof (boundary) - 1] = '\0';
+
+        msg = soup_message_new (SOUP_METHOD_GET, "http://foo/multipart");
+        headers = soup_message_get_response_headers (msg);
+        content_type = g_strconcat ("multipart/x-mixed-replace; boundary=", boundary, NULL);
+        soup_message_headers_replace (headers, "Content-Type", content_type);
+
+        /* One part whose body is a single byte, then EOF without a closing boundary */
+        raw_data = g_strconcat ("--", boundary, "\r\nContent-Type: text/plain\r\n\r\nX", NULL);
+        in = g_memory_input_stream_new_from_data (raw_data, strlen (raw_data), NULL);
+        multipart = soup_multipart_input_stream_new (msg, in);
+        g_object_unref (in);
+
+        part = soup_multipart_input_stream_next_part (multipart, NULL, &error);
+        g_assert_no_error (error);
+        g_assert_nonnull (part);
+
+        nread = g_input_stream_read (part, buffer, sizeof (buffer), NULL, &error);
+        g_assert_no_error (error);
+        g_assert_cmpint (nread, ==, 1);
+        g_assert_cmpint (buffer[0], ==, 'X');
+
+        nread = g_input_stream_read (part, buffer, sizeof (buffer), NULL, &error);
+        g_assert_no_error (error);
+        g_assert_cmpint (nread, ==, 0);
+
+        g_object_unref (part);
+        g_object_unref (multipart);
+        g_object_unref (msg);
+        g_free (raw_data);
+        g_free (content_type);
+}
+
+static void
+test_multipart_unbounded_header_growth (void)
+{
+        SoupMessage *msg;
+        SoupMessageHeaders *headers;
+        GInputStream *in;
+        GInputStream *next_part;
+        SoupMultipartInputStream *multipart;
+        GError *error = NULL;
+        GString *raw_data;
+        gsize fill_line_count = 2000;
+        gsize ii;
+
+        raw_data = g_string_new ("--cut-here\r\n");
+        for (ii = 0; ii < fill_line_count; ii++) {
+                g_string_append (raw_data, "X-Fill: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n");
+        }
+
+        g_test_message ("feeding %" G_GSIZE_FORMAT " bytes of unterminated part headers",
+                        raw_data->len);
+
+        msg = soup_message_new (SOUP_METHOD_GET, "http://foo/upload");
+        headers = soup_message_get_response_headers (msg);
+        soup_message_headers_replace (headers, "Content-Type", "multipart/x-mixed-replace; boundary=cut-here");
+
+        in = g_memory_input_stream_new_from_data (raw_data->str, raw_data->len, NULL);
+        multipart = soup_multipart_input_stream_new (msg, in);
+        g_object_unref (in);
+
+        next_part = soup_multipart_input_stream_next_part (multipart, NULL, &error);
+
+        g_assert_error (error, G_IO_ERROR, G_IO_ERROR_PARTIAL_INPUT);
+        g_assert_null (next_part);
+        g_clear_error (&error);
+
+        g_object_unref (multipart);
+        g_object_unref (msg);
+        g_string_free (raw_data, TRUE);
+}
+
+static void
 test_multipart_too_large (void)
 {
 	const char *raw_body =
@@ -663,7 +795,10 @@ main (int argc, char **argv)
 	g_test_add_func ("/multipart/bounds-bad", test_multipart_bounds_bad);
 	g_test_add_func ("/multipart/bounds-bad-2", test_multipart_bounds_bad_2);
         g_test_add_func ("/multipart/bounds-bad-3", test_multipart_bounds_bad_3);
+        g_test_add_func ("/multipart/bounds-bad-4", test_multipart_bounds_bad_4);
+        g_test_add_func ("/multipart/short-body", test_multipart_short_body);
 	g_test_add_func ("/multipart/too-large", test_multipart_too_large);
+	g_test_add_func ("/multipart/unbounded-header-growth", test_multipart_unbounded_header_growth);
 
 	ret = g_test_run ();
 

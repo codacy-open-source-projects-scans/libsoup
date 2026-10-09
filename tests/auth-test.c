@@ -313,7 +313,7 @@ do_pipelined_auth_test (void)
 		g_object_set_data (G_OBJECT (msg), "#", GINT_TO_POINTER (i + 1));
 		g_signal_connect (msg, "authenticate",
 				  G_CALLBACK (bug271540_authenticate), &authenticated);
-		g_signal_connect (msg, "wrote_headers",
+		g_signal_connect (msg, "wrote-headers",
 				  G_CALLBACK (bug271540_sent), &authenticated);
 
 		g_signal_connect (msg, "finished",
@@ -760,7 +760,7 @@ static gboolean
 async_authenticate_cancel_idle (AsyncAuthCancelData *data)
 {
 	g_cancellable_cancel (data->cancellable);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static gboolean
@@ -1109,7 +1109,7 @@ auth_close_idle_authenticate (gpointer user_data)
 	soup_auth_authenticate (acd->auth, "user", "good-basic");
 
 	g_object_unref (acd->auth);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static gboolean
@@ -1172,7 +1172,7 @@ static gboolean
 infinite_cancel (gpointer session)
 {
 	soup_session_abort (session);
-	return FALSE;
+	return G_SOURCE_REMOVE;
 }
 
 static gboolean

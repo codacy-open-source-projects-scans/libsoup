@@ -1,5 +1,5 @@
 project('libsoup', 'c',
-        version: '3.7.0',
+        version: '3.8.0',
         meson_version : '>= 0.62',
         license : 'LGPL-2.0-or-later',
         default_options : [
@@ -18,7 +18,7 @@ soup_version = meson.project_version()
 # - If binary compatibility has been broken (eg removed or changed interfaces)
 #   change to [C+1, 0, 0]
 # - If the interface is the same as the previous version, use [C, R+1, A].
-soup_version_info = [7, 3, 7]
+soup_version_info = [8, 0, 8]
 
 # Turn [C, R, A] into an actual usable *soversion*.
 soup_soversion_major = soup_version_info[0] - soup_version_info[2] # Current-Age
@@ -134,9 +134,21 @@ if not sqlite_dep.found()
   sqlite_dep = dependency('sqlite3')
 endif
 
-brotlidec_dep = dependency('libbrotlidec', required : get_option('brotli'))
+# brotli-1.1.0+ Required for brotli's shared dictionary APIs
+brotli_required_version = '>= 1.1.0'
+brotlidec_dep = dependency('libbrotlidec',
+                           version : brotli_required_version,
+                           required : get_option('brotli'))
+brotlienc_dep = dependency('libbrotlienc',
+                           version : brotli_required_version,
+                           required : get_option('brotli'))
 if brotlidec_dep.found()
   cdata.set('WITH_BROTLI', true)
+endif
+
+libzstd_dep = dependency('libzstd', required : get_option('zstd'), version: '>= 1.4.0')
+if libzstd_dep.found()
+  cdata.set('WITH_ZSTD', true)
 endif
 
 unix_socket_dep = dependency('gio-unix-2.0',
@@ -160,6 +172,10 @@ endif
 libpsl_required_version = '>= 0.20'
 libpsl_dep = dependency('libpsl', version : libpsl_required_version,
   fallback : ['libpsl', 'libpsl_dep'])
+
+if cc.has_header('dlfcn.h')
+    cdata.set('HAVE_DLFCN_H', '1')
+endif
 
 if cc.has_function('gmtime_r', prefix : '#include <time.h>', args : default_source_flag)
     cdata.set('HAVE_GMTIME_R', '1')
@@ -395,6 +411,7 @@ summary({
     'GSSAPI' : gssapi_dep.found(),
     'NTLM' : ntlm_auth.found(),
     'Brotli' : brotlidec_dep.found(),
+    'zstd' : libzstd_dep.found(),
     'Translations' : xgettext.found(),
     'GIR' : enable_introspection,
     'VAPI' : enable_vapi,

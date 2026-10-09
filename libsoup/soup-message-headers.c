@@ -9,6 +9,7 @@
 #include <config.h>
 #endif
 
+#include <errno.h>
 #include <string.h>
 
 #include "soup-message-headers-private.h"
@@ -282,29 +283,33 @@ soup_message_headers_append_common (SoupMessageHeaders    *hdrs,
         }
 
         if (name == SOUP_HEADER_CONTENT_LENGTH) {
-                /* RFC 9110 - 7.7. Content-Length
-                 * If a message is received that has a Content-Length header field value consisting of
-                 * the same decimal value as a comma-separated list (Section 5.7.1) — for example,
-                 * "Content-Length: 42, 42" — indicating that duplicate Content-Length header fields have
-                 * been generated or combined by an upstream message processor, then the recipient must either
-                 * reject the message as invalid or replace the duplicated field values with a single valid
-                 * Content-Length field containing that decimal value prior to determining the message body
-                 * length or forwarding the message.
+                /* RFC 9110 - 8.6. Content-Length
+                 * "[A] sender MUST NOT forward a message with a Content-Length header field
+                 *  value that does not match the ABNF above, with one exception: a recipient
+                 *  of a Content-Length header field value consisting of the same decimal value
+                 *  repeated as a comma-separated list (e.g, "Content-Length: 42, 42") MAY
+                 *  either reject the message as invalid or replace that invalid field value
+                 *  with a single instance of the decimal value, since this likely indicates
+                 *  that a duplicate was generated or combined by an upstream message
+                 *  processor."
+                 *
                  */
                 const char *content_length = soup_message_headers_get_one_common (hdrs, SOUP_HEADER_CONTENT_LENGTH);
                 if (content_length) {
-                        guint64 decimal_value1, decimal_value2;
                         char *end;
 
-                        decimal_value1 = g_ascii_strtoull (content_length, &end, 10);
-                        if (*end)
+                        errno = 0;
+                        g_ascii_strtoull (content_length, &end, 10);
+                        if (*end || errno == ERANGE)
                                 return FALSE;
 
-                        decimal_value2 = g_ascii_strtoull (value, &end, 10);
-                        if (*end)
+                        errno = 0;
+                        g_ascii_strtoull (value, &end, 10);
+                        if (*end || errno == ERANGE)
                                 return FALSE;
 
-                        return decimal_value1 == decimal_value2;
+                        if (strcmp (content_length, value) != 0)
+                                return FALSE;
                 }
         }
 
@@ -1223,7 +1228,12 @@ sort_ranges (gconstpointer a, gconstpointer b)
 	SoupRange *ra = (SoupRange *)a;
 	SoupRange *rb = (SoupRange *)b;
 
-	return ra->start - rb->start;
+	if (ra->start < rb->start)
+		return -1;
+	else if (ra->start > rb->start)
+		return 1;
+	else
+		return 0;
 }
 
 /* like soup_message_headers_get_ranges(), except it returns:
@@ -1267,6 +1277,17 @@ soup_message_headers_get_ranges_internal (SoupMessageHeaders  *hdrs,
 	if (!range_list)
 		return SOUP_STATUS_OK;  /* invalid list */
 
+	/* Reject the header outright if it asks for more ranges than we are
+	 * willing to serve, rather than answering with the whole body: a client
+	 * asking for this many ranges wants to be told so, and RFC 9110 §14.2
+	 * allows rejecting such a header for exactly this reason.
+	 */
+	if (g_slist_length (range_list) > MAX_RANGES) {
+		soup_header_free_list (range_list);
+		return check_satisfiable ? SOUP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE
+					 : SOUP_STATUS_OK;
+	}
+
 	/* Loop through the ranges and modify the status accordingly. Default to
 	 * status 200 (OK, ignoring the ranges). Switch to status 206 (Partial
 	 * Content) if there is at least one partially valid range. Switch to
@@ -1278,15 +1299,48 @@ soup_message_headers_get_ranges_internal (SoupMessageHeaders  *hdrs,
 
 		spec = r->data;
 		if (*spec == '-') {
-			cur.start = g_ascii_strtoll (spec, &end, 10) + total_length;
+			gint64 suffix_length;
+
+			errno = 0;
+			suffix_length = g_ascii_strtoll (spec, &end, 10);
+
+			/* A suffix range asks for the last -suffix_length bytes
+			 * of the body. If the body is shorter than that then the
+			 * whole body is used, per RFC 9110 §14.1.2; without
+			 * clamping, the start would go negative and reach the
+			 * assertion below.
+			 */
+			if (errno == ERANGE || suffix_length <= -total_length)
+				cur.start = 0;
+			else
+				cur.start = total_length + suffix_length;
+
 			cur.end = total_length - 1;
 		} else {
-			cur.start = g_ascii_strtoull (spec, &end, 10);
+			guint64 value;
+
+			errno = 0;
+			value = g_ascii_strtoull (spec, &end, 10);
+			if (errno == ERANGE || value > G_MAXINT64) {
+				is_all_valid = FALSE;
+				continue;
+			}
+			cur.start = (goffset) value;
+
 			if (*end == '-')
 				end++;
-			if (*end)
-				cur.end = g_ascii_strtoull (end, &end, 10);
-			else
+			if (*end) {
+				errno = 0;
+				value = g_ascii_strtoull (end, &end, 10);
+
+				/* An end this large is clamped to the end of the
+				 * body below, like any other end past it.
+				 */
+				if (errno == ERANGE || value > G_MAXINT64)
+					cur.end = G_MAXINT64;
+				else
+					cur.end = (goffset) value;
+			} else
 				cur.end = total_length - 1;
 		}
 
@@ -1327,19 +1381,24 @@ soup_message_headers_get_ranges_internal (SoupMessageHeaders  *hdrs,
 	}
 
 	if (total_length) {
-		guint i;
+		SoupRange *data;
+		guint i, last = 0;
 
 		g_array_sort (array, sort_ranges);
-		for (i = 1; i < array->len; i++) {
-			SoupRange *cur = &((SoupRange *)array->data)[i];
-			SoupRange *prev = &((SoupRange *)array->data)[i - 1];
 
-			if (cur->start <= prev->end) {
-				prev->end = MAX (prev->end, cur->end);
-				g_array_remove_index (array, i);
-				i--;
-			}
+		/* Merge overlapping ranges into the run being built at @last.
+		 * Removing the merged elements one at a time instead made this
+		 * quadratic in the number of ranges.
+		 */
+		data = (SoupRange *)array->data;
+		for (i = 1; i < array->len; i++) {
+			if (data[i].start <= data[last].end)
+				data[last].end = MAX (data[last].end, data[i].end);
+			else
+				data[++last] = data[i];
 		}
+
+		g_array_set_size (array, last + 1);
 	}
 
 	*ranges = (SoupRange *)array->data;
@@ -1371,6 +1430,11 @@ soup_message_headers_get_ranges_internal (SoupMessageHeaders  *hdrs,
  *
  * Beware that even if given a @total_length, this function does not
  * check that the ranges are satisfiable.
+ *
+ * A Range header requesting more than 200 ranges is rejected, since serving
+ * that many ranges costs far more than the request asking for them.
+ * [class@Server] answers such a request with
+ * %SOUP_STATUS_REQUESTED_RANGE_NOT_SATISFIABLE.
  *
  * [class@Server] has built-in handling for range requests. If your
  * server handler returns a %SOUP_STATUS_OK response containing the
@@ -1486,6 +1550,30 @@ soup_message_headers_set_range (SoupMessageHeaders  *hdrs,
 	soup_message_headers_set_ranges (hdrs, &range, 1);
 }
 
+/* Parses one decimal offset from a Content-Range header, rejecting anything
+ * which isn't a plain run of digits fitting in a goffset. In particular a
+ * leading '-' must not be accepted: g_ascii_strtoull() would happily wrap it
+ * round into a large unsigned value.
+ */
+static gboolean
+parse_content_range_offset (const char *in,
+			    char      **out_end,
+			    goffset    *out)
+{
+	guint64 value;
+
+	if (!g_ascii_isdigit (*in))
+		return FALSE;
+
+	errno = 0;
+	value = g_ascii_strtoull (in, out_end, 10);
+	if (errno == ERANGE || value > G_MAXINT64)
+		return FALSE;
+
+	*out = (goffset) value;
+	return TRUE;
+}
+
 /**
  * soup_message_headers_get_content_range:
  * @hdrs: a #SoupMessageHeaders
@@ -1498,6 +1586,11 @@ soup_message_headers_set_range (SoupMessageHeaders  *hdrs,
  * @end, and @total_length. If the total length field in the header
  * was specified as "*", then @total_length will be set to -1.
  *
+ * On success @start and @end are always non-negative, @end is not before
+ * @start, and @end is within @total_length if that was given, so they can be
+ * used directly as offsets into the response body. The out parameters are
+ * left untouched if the header cannot be parsed.
+ *
  * Returns: %TRUE if @hdrs contained a "Content-Range" header
  *   containing a byte range which could be parsed, %FALSE otherwise.
  **/
@@ -1508,7 +1601,7 @@ soup_message_headers_get_content_range (SoupMessageHeaders  *hdrs,
 					goffset             *total_length)
 {
 	const char *header;
-	goffset length;
+	goffset first_pos, last_pos, length;
 	char *p;
 
 	g_return_val_if_fail (hdrs, FALSE);
@@ -1521,25 +1614,34 @@ soup_message_headers_get_content_range (SoupMessageHeaders  *hdrs,
 	header += 6;
 	while (g_ascii_isspace (*header))
 		header++;
-	if (!g_ascii_isdigit (*header))
-		return FALSE;
 
-	*start = g_ascii_strtoull (header, &p, 10);
-	if (*p != '-')
+	if (!parse_content_range_offset (header, &p, &first_pos) || *p != '-')
 		return FALSE;
-	*end = g_ascii_strtoull (p + 1, &p, 10);
-	if (*p != '/')
+	if (!parse_content_range_offset (p + 1, &p, &last_pos) || *p != '/')
 		return FALSE;
 	p++;
 	if (*p == '*') {
 		length = -1;
 		p++;
-	} else
-		length = g_ascii_strtoull (p, &p, 10);
+	} else if (!parse_content_range_offset (p, &p, &length))
+		return FALSE;
 
+	if (*p != '\0')
+		return FALSE;
+
+	/* The range has to describe an actual span of the resource, otherwise
+	 * it is not something a caller can use as offsets.
+	 */
+	if (last_pos < first_pos)
+		return FALSE;
+	if (length >= 0 && last_pos >= length)
+		return FALSE;
+
+	*start = first_pos;
+	*end = last_pos;
 	if (total_length)
 		*total_length = length;
-	return *p == '\0';
+	return TRUE;
 }
 
 /**
@@ -1576,6 +1678,23 @@ soup_message_headers_set_content_range (SoupMessageHeaders  *hdrs,
 		header = g_strdup_printf ("bytes %" G_GINT64_FORMAT "-%"
 					  G_GINT64_FORMAT "/*", start, end);
 	}
+	soup_message_headers_replace_common (hdrs, SOUP_HEADER_CONTENT_RANGE, header, SOUP_HEADER_VALUE_TRUSTED);
+	g_free (header);
+}
+
+/* Sets @hdrs's Content-Range header to the unsatisfied-range form,
+ * "bytes * /@total_length", which RFC 9110 §15.5.17 asks a 416 response to
+ * carry so that the client learns how long the resource actually is.
+ */
+void
+soup_message_headers_set_content_range_unsatisfied (SoupMessageHeaders *hdrs,
+						    goffset             total_length)
+{
+	char *header;
+
+	g_return_if_fail (hdrs);
+
+	header = g_strdup_printf ("bytes */%" G_GINT64_FORMAT, total_length);
 	soup_message_headers_replace_common (hdrs, SOUP_HEADER_CONTENT_RANGE, header, SOUP_HEADER_VALUE_TRUSTED);
 	g_free (header);
 }

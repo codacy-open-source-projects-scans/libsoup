@@ -80,21 +80,27 @@ endif
 tests = [
   {'name': 'cache'},
   {'name': 'chunk-io'},
-  {'name': 'coding'},
+  {'name': 'coding',
+   'dependencies': [brotlienc_dep, libzstd_dep],
+   'c_args': ['-DWITH_BROTLI_ENC=@0@'.format(brotlienc_dep.found() ? 1 : 0),
+              '-DWITH_ZSTD_ENC=@0@'.format(libzstd_dep.found() ? 1 : 0)]},
   {'name': 'context'},
   {'name': 'continue'},
-  {'name': 'cookies'},
+  {'name': 'cookies',
+   'dependencies': [sqlite_dep]},
   {'name': 'date'},
+  {'name': 'digest-nonce-replay'},
   {'name': 'forms'},
   {'name': 'header-parsing'},
   {'name': 'http2', 'slow': true},
   {'name': 'http2-body-stream', 'slow': true},
   {'name': 'hsts'},
   {'name': 'hsts-db'},
-  {'name': 'logger'},
+  {'name': 'logger', 'slow': true},
   {'name': 'misc'},
   {'name': 'multipart'},
   {'name': 'multithread'},
+  {'name': 'proxy-auth-cache', 'parallel': false},
   {'name': 'no-ssl'},
   {'name': 'ntlm'},
   {'name': 'range', 'parallel': false},
@@ -125,15 +131,27 @@ tests = [
    'slow': true},
 ]
 
-if brotlidec_dep.found()
-  tests += [{'name': 'brotli-decompressor'}]
+if brotlidec_dep.found() or libzstd_dep.found()
+  tests += [{'name': 'decompressor'}]
 
   if installed_tests_enabled
-    install_data(
-      'brotli-data/compressed.br',
-      'brotli-data/corrupt.br',
-      'brotli-data/uncompressed.txt',
-      install_dir : join_paths(installed_tests_execdir, 'brotli-data'),
+    compressed_data_files = [
+      'compressed-data/uncompressed.txt',
+    ]
+    if brotlidec_dep.found()
+      compressed_data_files += [
+        'compressed-data/compressed.br',
+        'compressed-data/corrupt.br',
+      ]
+    endif
+    if libzstd_dep.found()
+      compressed_data_files += [
+        'compressed-data/compressed.zst',
+        'compressed-data/corrupt.zst',
+      ]
+    endif
+    install_data(compressed_data_files,
+      install_dir : join_paths(installed_tests_execdir, 'compressed-data'),
     )
   endif
 endif
@@ -186,9 +204,7 @@ env.set('MALLOC_CHECK_', '2')
 env.set('MALLOC_PERTURB_', '')
 env.set('LSAN_OPTIONS', 'suppressions=@0@/.gitlab-ci/leak_suppressions'.format(meson.project_source_root()))
 
-if meson.version().version_compare('>= 0.58.0')
-  meson.add_devenv(env)
-endif
+meson.add_devenv(env)
 
 if have_autobahn
    subdir('autobahn')
